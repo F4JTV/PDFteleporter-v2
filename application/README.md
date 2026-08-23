@@ -1,258 +1,358 @@
 # PDF Teleporter
 
-Compresses PDF documents into compact `.psdi` archives for transmission over
-narrow radio links (Packet TNC, VARA HF/FM, Winlink Express attachments), and
-rebuilds them into readable PDFs on reception.
+Compresse des documents PDF en archives `.psdi` compactes pour les transmettre
+sur des liaisons radio à bande étroite (TNC Packet, VARA HF/FM, pièces jointes
+Winlink Express), et les recompose en PDF lisibles à la réception.
 
-A 600 kB situation report that would take a quarter of an hour to push through
-VARA HF fits into roughly 120 kB and moves in about three minutes, with its
-layout intact at the other end.
+Un SITREP de 600 ko qui demanderait un quart d'heure en VARA HF tient dans
+environ 120 ko et passe en trois minutes, sa mise en page intacte à l'arrivée.
 
-PyQt6 rewrite of an earlier Tkinter application, with Windows Explorer
-integration added. Archives remain byte-compatible with other `.psdi`
-implementations, so a station running a different build can still rebuild what
-this one sends.
+---
 
-## Install
+## Origine et attribution
+
+Cette application est **dérivée du travail de F1GBD (ADRASEC 77 – FNRASEC)**,
+auteur du PDFteleporter original et du format `.psdi`. La conception du format,
+le choix des deux modes d'encodage, les préréglages de qualité et l'essentiel
+des correctifs de rendu qui font que la recomposition ressemble au document
+d'origine sont son travail, pas le nôtre.
+
+L'original était distribué sous **GNU GPL v3** sous forme de binaire PyInstaller
+Windows, sans code source publié. La GPL v3 accorde explicitement le droit
+d'accéder au source correspondant et de modifier l'œuvre ; le source a donc été
+reconstitué depuis le bytecode livré, puis réécrit. Le dossier `reference/` de
+l'archive complète conserve ce matériel de reconstitution.
+
+Ce dérivé reste sous **GNU GPL v3**, comme l'exige la licence de l'original.
+PyMuPDF, utilisé par le moteur, est sous AGPL v3.
+
+**Le format `.psdi` n'a pas été modifié.** C'est un contrat d'interopérabilité :
+une station qui utilise la version de F1GBD doit pouvoir recomposer ce que cette
+version émet, et réciproquement. Toutes les optimisations décrites plus bas ont
+été retenues précisément parce qu'elles restent lisibles par un décodeur écrit
+sur la spécification d'origine.
+
+---
+
+## Installation
 
 ```
 pip install -r requirements.txt
 python pdfteleporter.py
 ```
 
-Python 3.10 or later.
+Python 3.10 ou ultérieur. Aucune compilation nécessaire pour un usage depuis les
+sources.
 
-## Use
+## Utilisation
 
-The interface is in French: it is used by French emergency-communications
-operators, and an English interface in that setting is a source of hesitation
-under time pressure. Code, comments and this document stay in English.
+### Interface graphique
 
-Qt's own French catalogue (`qtbase_fr.qm`) is loaded at startup and bundled by
-the spec. Without it the window reads in French while every file dialog and
-standard button Qt supplies is in English.
+Compression à gauche, recomposition à droite, journal horodaté en bas. La
+sélection d'une archive déclenche immédiatement la vérification de sa signature
+et de son CRC : un fichier abîmé en transit est repéré avant qu'on perde du
+temps à le recomposer.
 
-**Graphical.** Compression on the left, rebuild on the right, timestamped log
-across the bottom.
+L'interface est en français et suit le réglage clair/sombre de Windows.
 
-The interface forces the Qt **Fusion** style. Fusion renders identically on
-every Windows version and under Wine, which matters for a tool deployed to
-whatever machines an exercise provides: the Windows 11, Windows 10 and legacy
-styles differ enough in metrics that a layout verified on one can crowd or clip
-on another.
+### Menu contextuel de l'Explorateur
 
-Forcing the style does not override the operator's system settings. Fusion
-draws from the application palette, so the light or dark palette is chosen from
-the system colour scheme and reapplied if that scheme changes while the
-application is running. The dark palette is built explicitly rather than left
-to Qt, which derives one on its own only where the platform plugin reports a
-colour scheme. Selecting an archive validates its signature and CRC
-immediately, so a file damaged in transit is caught before any time is spent
-rebuilding it.
+*Outils → Ajouter au menu contextuel de l'Explorateur* enregistre deux verbes :
 
-**Explorer context menu.** *Tools → Add Explorer context menu* registers two
-verbs under `HKEY_CURRENT_USER` (no elevation, nothing machine-wide):
+- clic droit sur un `.pdf` → **Téléporter : compresser en .psdi**
+- clic droit sur un `.psdi` → **Téléporter : recomposer le PDF**
 
-- right-click a `.pdf` → **Teleport: compress to .psdi**
-- right-click a `.psdi` → **Teleport: rebuild PDF**
+Sous Windows 11, ces entrées apparaissent sous *Afficher plus d'options* (ou
+Maj+F10). Atteindre le menu de premier niveau exige une extension shell MSIX
+signée, disproportionnée pour un outil employé quelques fois par exercice.
 
-On Windows 11 these appear under *Show more options* (or Shift+F10). Reaching
-the top-level menu requires a signed MSIX shell extension, which is a
-disproportionate amount of machinery for a tool used a few times per exercise.
-
-**Command line.**
+### Ligne de commande
 
 ```
 python pdfteleporter.py compress SITREP.pdf -q low
-python pdfteleporter.py rebuild  SITREP.psdi -o out.pdf
+python pdfteleporter.py rebuild  SITREP.psdi -o sortie.pdf
 python pdfteleporter.py inspect  SITREP.psdi
 python pdfteleporter.py presets
 python pdfteleporter.py shell install
 ```
 
-## Quality presets
+## Préréglages de qualité
 
-| Preset | DPI | JPEG | Coordinates | Intended link |
+| Préréglage | ppp | JPEG | Coordonnées | Liaison visée |
 |---|---|---|---|---|
-| `ultra_low` | 72 | 20 | whole points | Emergency, Packet 1200 baud |
-| `low` | 90 | 30 | whole points | Packet 9600, slow VARA HF |
-| `medium` | 120 | 45 | 0.1 pt | VARA HF / FM, the usual choice |
-| `high` | 150 | 55 | 0.1 pt | Fast VARA FM |
+| `ultra_low` | 72 | 20 | point entier | Urgence, Packet 1200 bauds |
+| `low` | 90 | 30 | point entier | Packet 9600, VARA HF lent |
+| `medium` | 120 | 45 | 0,1 pt | VARA HF / FM, le choix courant |
+| `high` | 150 | 55 | 0,1 pt | VARA FM rapide |
 
-`Text only` drops every image, which is the fastest possible transfer when only
-the wording matters.
+*Texte seul* supprime toutes les images : c'est le transfert le plus rapide
+possible quand seul le libellé compte.
 
-## How it encodes
+---
 
-Two encodings share one container.
+## Comment l'encodage fonctionne
 
-**Structured** keeps text as text: each span carries its bounding box, size,
-colour and a coarse font classification, and images are extracted once by xref
-then re-placed by reference. Glyphs never become pixels, so this is far more
-compact for a document that was born digital.
+Deux encodages partagent un même conteneur.
 
-**Page image** flattens each page to a single JPEG. Larger, but it is the only
-thing that works for a scan, and the only path that composites ink masks and
-honours page rotation the way a viewer does.
+**Structuré** garde le texte comme texte : chaque fragment porte sa boîte
+englobante, sa taille, sa couleur et une classification grossière de police ;
+les images sont extraites une fois par xref puis replacées par référence. Les
+glyphes ne deviennent jamais des pixels, ce qui rend ce mode bien plus compact
+pour un document né numérique.
 
-The choice is not left to the operator. A scanned prefectural order looks like
-a PDF but behaves like a photograph; encoding it structurally produces a page
-rotated 90° on a black background. `detect_optimal_mode` looks for rotation
-and for pages that are mostly image with almost no text, and switches to page
-image mode on its own, logging why.
+**Image de page** aplatit chaque page en un seul JPEG. Plus volumineux, mais
+c'est la seule chose qui fonctionne pour un scan, et le seul chemin qui compose
+correctement les masques d'encre et respecte la rotation de page.
 
-Three quirks of real-world documents are handled explicitly, because each one
-produced visibly broken output before:
+Le choix n'est pas laissé à l'opérateur. Un arrêté préfectoral scanné ressemble
+à un PDF mais se comporte comme une photographie ; l'encoder en structuré
+produit une page pivotée de 90° sur fond noir. La détection repère la rotation
+et les pages majoritairement image sans texte, et bascule d'elle-même en
+journalisant pourquoi.
 
-- LibreOffice writes the `ti` and `tt` ligatures as non-standard code points
-  (U+019F, U+01A9) that arrive as replacement characters. They are decomposed
-  on extraction; where the glyph is already lost, the substitution is guessed
-  from context.
-- Microsoft's PDF chain draws frames as multi-segment paths. Taking a path's
-  overall bounding box instead of walking its sub-items paints a full-page
-  black rectangle, so sub-items are walked.
-- A checkbox tick lives in the widget's `/AP /N` appearance stream, which
-  neither `get_text` nor `get_drawings` reports. Ticked boxes are collected
-  separately and redrawn as a geometric polyline, with no font dependency.
+### Correctifs de rendu hérités de l'original
 
-## Where the bytes go
+Ces traitements viennent de F1GBD et ont été conservés à l'identique. Ils sont
+le fruit de son travail sur de vrais documents et chacun corrige un défaut
+visible en réception :
 
-On a dense six-page report, text accounts for about 91% of the compressed
-manifest; vector rectangles compress to almost nothing because LZMA already
-exploits their repetition. Optimising anything other than the text encoding is
-therefore wasted effort.
+- **Ligatures LibreOffice.** LibreOffice écrit les ligatures `ti` et `tt` en
+  points de code non standard (U+019F, U+01A9) qui arrivent en caractères de
+  remplacement. Elles sont décomposées à l'extraction ; là où le glyphe est déjà
+  perdu, la substitution est déduite du contexte.
+- **Tracés multi-segments.** La chaîne PDF de Microsoft dessine les cadres en
+  chemins multi-segments. Prendre la boîte englobante globale d'un chemin plutôt
+  que de parcourir ses sous-éléments peint un rectangle noir pleine page.
+- **Cases à cocher AcroForm.** La coche vit dans le flux d'apparence `/AP /N` du
+  widget, que ni `get_text` ni `get_drawings` ne restituent. Les cases cochées
+  sont relevées séparément et redessinées en polyligne géométrique, sans
+  dépendance de police.
+- **Interligne des très petites polices.** Une hauteur de rendu proportionnelle
+  (`line_height × 1,15` ou `fontsize × 1,20`, le maximum des deux) et une marge
+  horizontale d'un demi-point évitent le chevauchement des lignes et le
+  débordement de cellule sur les tableaux Excel à polices de ~4 pt.
 
-Four reductions are applied, and none of them changes the format. A decoder
-written against the original specification reads these archives unmodified,
-because the manifest has always been read with `.get(key, default)`:
+---
 
-| Change | Effect |
+## Ce qui change par rapport à l'original
+
+### Architecture
+
+| Original | Ici |
 |---|---|
-| Omit span keys equal to their default (`f`, `fa`, `c`) | −2% |
-| Omit the span box on a single-span line | −18% |
-| LZMA2 `pb=0` with the extreme match finder | −2% |
-| Whole-point coordinates on the two lowest presets | −6% |
+| Tkinter | PyQt6, style Fusion forcé |
+| Moteur et IHM en deux fichiers monolithiques | Moteur séparé (`format` / `engine` / `presets`), IHM isolée |
+| Pas de ligne de commande | CLI headless complet |
+| Un exécutable fenêtré | Deux : fenêtré (IHM) et console (CLI) |
+| Aucune intégration bureau | Menu contextuel Explorateur |
+| Pas d'installateur | Installateur Inno Setup 7 |
+| Pas d'icône ni de métadonnées | Icône multi-résolution et ressources de version |
 
-Measured end to end on a six-page report: **5,223 → 4,116 bytes at `medium`
-(−21%)**, and **3,812 bytes at `low` (−27%)**.
+Le moteur d'origine était déjà une bibliothèque autonome sans dépendance à
+l'IHM — l'auteur l'avait conçue pour être appelée depuis son application TCQ.
+Cette séparation a été préservée et renforcée : le clic droit dans l'Explorateur
+appelle le CLI, pas l'interface graphique, et ne démarre donc pas Qt pour une
+simple conversion.
 
-The single-span case matters most because a lone span covers exactly its line,
-so its box was stored twice in the archive. The reader already falls back to
-the line box when a span has none.
+### Compression : −21 % à `medium`, −27 % à `low`
 
-Whole-point coordinates were checked rather than assumed: a twelve-row table
-in 7 pt text rebuilds with no cell overflow and no line overlap. Half-point
-rounding was measured too and turned out *worse* than no rounding at all — it
-appends `.5` to values that were previously whole numbers.
+Le profilage montre que le texte pèse 91 % du manifeste compressé ; les
+rectangles vectoriels tombent de 28 837 à 379 octets parce que LZMA exploite
+déjà leur répétition. Optimiser ailleurs était sans objet — le dédoublonnage de
+rectangles a été implémenté puis retiré, gain mesuré exactement nul.
 
-Page-image mode gains separately: JPEG is written progressively, which is
-identical pixel-for-pixel and five to nine percent smaller, and a page with no
-meaningful colour has its chroma planes dropped. A scanned order in black ink
-comes out about 14% smaller with nothing lost.
+| Changement | Effet |
+|---|---|
+| Omission des clés de fragment égales à leur défaut (`f`, `fa`, `c`) | −2 % |
+| Omission de la boîte du fragment sur une ligne à fragment unique | −18 % |
+| LZMA2 `pb=0` avec recherche de correspondances extrême | −2 % |
+| Coordonnées au point entier sur les deux préréglages bas | −6 % |
 
-## Archive format
+Mesuré de bout en bout sur un rapport de six pages : **5 223 → 4 116 octets à
+`medium`**, et **3 812 octets à `low`**.
 
-Little-endian throughout.
+Le cas du fragment unique pèse le plus lourd parce qu'un fragment seul couvre
+exactement sa ligne : sa boîte était donc stockée deux fois. Le lecteur retombe
+déjà sur la boîte de ligne quand un fragment n'en a pas — l'omission est donc
+transparente pour tout décodeur.
+
+L'arrondi au point entier a été vérifié plutôt que supposé : un tableau de douze
+lignes en texte 7 pt se recompose sans débordement de cellule ni chevauchement.
+L'arrondi au demi-point a été mesuré aussi et s'avère *pire* que pas d'arrondi
+du tout — il ajoute `,5` à des valeurs qui étaient entières.
+
+Le mode image gagne séparément : le JPEG est écrit en progressif, identique
+pixel pour pixel et 5 à 9 % plus petit, et une page sans couleur significative
+perd ses plans de chrominance. Un arrêté scanné à l'encre noire sort environ
+14 % plus léger sans rien perdre.
+
+Deux changements mineurs au passage : les charges utiles JPEG ne sont plus
+recompressées en LZMA quand cela les gonfle, le drapeau enregistrant le choix ;
+et les images sont triées numériquement à l'écriture, si bien que deux
+compressions du même document produisent des archives identiques au bit près.
+
+### Correctifs
+
+**Rotation ignorée en mode texte seul.** L'original désactivait entièrement la
+détection automatique de mode dès que « texte seul » était coché
+(`if mode == 'struct' and not skip_images:`). Un document pivoté cochant cette
+case se recomposait donc de travers. Ignorer les images est un choix légitime ;
+ignorer une rotation ne l'est jamais, puisque le mode structuré travaille en
+coordonnées non pivotées. La détection tourne désormais toujours, seule la
+raison « scan » étant écartée en mode texte seul.
+
+**Empaquetage.** Le binaire d'origine embarquait 846 Mo décompressés, dont
+330 Mo de PyTorch, plus transformers, pyarrow, scipy, sklearn et onnxruntime —
+aucun atteignable depuis le code, tous ramassés par PyInstaller dans
+l'environnement de développement. Le fichier `.spec` nomme explicitement les
+paquets à exclure, et le script de compilation alerte si la sortie dépasse
+250 Mo.
+
+**Cohérence de version.** Le module d'origine annonçait `1.0.5` dans son
+en-tête alors que la constante indiquait `1.0.6` ; l'historique n'avait pas été
+mis à jour.
+
+---
+
+## Format d'archive
+
+Petit-boutiste partout.
 
 ```
-[0:4]   magic b'PSDI'
+[0:4]   signature b'PSDI'
 [4:6]   uint16  version
 
-version 1 - structured
-    uint32  crc32 of the uncompressed manifest
-    uint32  compressed manifest length
-    bytes   manifest, JSON, LZMA raw stream, single LZMA2 filter
-    uint16  image count
-    per image:  uint16 xref | uint8 flags | uint32 length | bytes payload
+version 1 — structuré
+    uint32  crc32 du manifeste non compressé
+    uint32  longueur du manifeste compressé
+    octets  manifeste, JSON, flux LZMA brut, filtre LZMA2 unique
+    uint16  nombre d'images
+    par image : uint16 xref | uint8 drapeaux | uint32 longueur | octets
 
-version 2 - page image
-    uint16  page count
-    per page:   float32 width | float32 height | uint8 flags | uint32 length | bytes
+version 2 — image de page
+    uint16  nombre de pages
+    par page : float32 largeur | float32 hauteur | uint8 drapeaux |
+               uint32 longueur | octets
 ```
 
-Flags bit 0 marks an LZMA-compressed payload. It is not always set: JPEG data
-is already entropy-coded and LZMA usually inflates it, so each payload is
-stored whichever way came out smaller.
+Le bit 0 des drapeaux signale une charge utile compressée en LZMA. Il n'est pas
+toujours positionné : les données JPEG sont déjà codées par entropie et LZMA les
+gonfle en général, chaque charge utile est donc stockée dans la forme la plus
+petite des deux.
 
-This layout is an interoperability contract with stations on the air. Do not
-reorder or resize fields.
+**Cette disposition ne doit pas être modifiée.** Réordonner ou redimensionner un
+champ rompt l'interopérabilité avec les stations en service.
 
-## Building for Windows
+---
+
+## Compilation pour Windows
 
 ```
 pip install -r requirements.txt pyinstaller
 build.cmd full
 ```
 
-`build.cmd` alone builds only the application; `full` also compiles the
-installer. Output lands in `dist\PDFteleporter\` and `dist\installer\`.
+`build.cmd` seul construit uniquement l'application ; `full` compile aussi
+l'installateur. La sortie arrive dans `dist\PDFteleporter\` et
+`dist\installer\`.
 
-Two executables come out of one PyInstaller analysis:
+Deux exécutables sortent d'une seule analyse PyInstaller :
 
 | | |
 |---|---|
-| `PDFteleporter.exe` | windowed — the GUI, and what the context menu launches |
-| `psditool.exe` | console — so the command line can actually print |
+| `PDFteleporter.exe` | fenêtré — l'IHM, et ce que lance le menu contextuel |
+| `psditool.exe` | console — pour que la ligne de commande puisse afficher |
 
-A windowed executable has no stdout on Windows, so driving the CLI through
-`PDFteleporter.exe` from a terminal would silently produce nothing. The console
-twin costs a few hundred kilobytes and removes that trap.
+Un exécutable fenêtré n'a pas de `stdout` sous Windows : piloter le CLI via
+`PDFteleporter.exe` depuis un terminal n'afficherait rien du tout.
 
-The spec names the packages to exclude rather than trusting the build
-environment. PyInstaller bundles whatever it finds importable, and the original
-release shipped 846 MB unpacked — 330 MB of it torch — none of it reachable
-from this code. `build.cmd` warns if the output exceeds 250 MB, which is the
-symptom of an exclusion that no longer covers something newly installed.
+### Si le build démarre sur « No module named 'pymupdf' »
 
-### If the build launches with "No module named 'pymupdf'"
+L'environnement de compilation n'avait pas PyMuPDF, qui n'a donc jamais été
+embarqué. PyInstaller rétrograde un import caché manquant en simple
+avertissement et termine avec succès : la panne n'apparaît qu'au lancement.
 
-The build environment did not have PyMuPDF, so it was never bundled. PyInstaller
-downgrades a missing hidden import to a warning and finishes successfully, so
-the failure only surfaces when the executable is launched on a clean machine.
+C'est presque toujours une affaire de deux interpréteurs — les dépendances
+installées dans un Python, PyInstaller lancé sous un autre. La commande
+`pyinstaller` nue se résout via le `PATH`. Utilisez `python -m PyInstaller`.
 
-Almost always this is two interpreters: the dependencies were installed into one
-Python and PyInstaller ran under another. The bare `pyinstaller` command
-resolves through `PATH` and may not be the interpreter you think it is. Use
-`python -m PyInstaller` so both resolve to the same place.
+Les deux extrémités sont désormais protégées : le `.spec` refuse de construire
+si PyMuPDF, Pillow ou PyQt6 n'est pas importable, en nommant l'interpréteur
+qu'il a testé, et `build.cmd` vérifie après coup que `_internal\pymupdf` existe
+réellement.
 
-Both are now guarded. The spec refuses to build if PyMuPDF, Pillow or PyQt6 is
-not importable, naming the interpreter it checked, and `build.cmd` verifies
-after the build that `_internal\pymupdf` actually exists before declaring
-success. Since PyMuPDF ships no PyInstaller hook and PyInstaller bundles none
-for it, its compiled extensions are collected explicitly rather than left to
-automatic detection.
+PyMuPDF ne fournit aucun hook PyInstaller et PyInstaller n'en embarque pas non
+plus ; ses extensions compilées sont donc collectées explicitement. Les motifs
+de recherche par défaut (`lib*.so`, `*.dll`) ne correspondent à rien de ce que
+PyMuPDF livre — les extensions s'appellent `_extra.pyd` et `_mupdf.pyd` — et
+sont donc redéfinis.
 
-### Code signing and SmartScreen
+### Localisation dans le build
 
-Version metadata does **not** satisfy SmartScreen. The two are unrelated:
-Windows Defender SmartScreen checks for an Authenticode signature and the
-reputation attached to the signing certificate. An unsigned executable gets the
-blue *"Windows protected your PC"* screen on first run no matter how complete
-its version resource is, and the operator has to click *More info → Run anyway*.
+Le catalogue français de Qt (`qtbase_fr.qm`) est chargé au démarrage et embarqué
+par le `.spec` : le hook PyQt6 de PyInstaller ne collecte pas le répertoire des
+traductions, et sans lui la fenêtre serait en français tandis que chaque
+sélecteur de fichiers et bouton standard fourni par Qt resterait en anglais.
 
-What the version resource *does* buy: a proper Properties dialog, a sane entry
-in Add/Remove Programs, recognisable output for corporate software inventories,
-and one fewer heuristic flag for antivirus engines. Worth having, but not the
-answer to this particular question.
+### Installateur
 
-The real options, roughly in order of cost:
+`installer\pdfteleporter.iss` exige **Inno Setup 7**. Il emploie
+`SetupArchitecture=x64`, qui n'existe pas en Inno Setup 6 : cette version échoue
+sur une directive inconnue plutôt que de produire silencieusement autre chose.
 
-1. **Nothing.** Document the *More info → Run anyway* click. Perfectly workable
-   for a tool distributed to a known group who were told it was coming.
-2. **Self-signed certificate deployed to Trusted Publishers by group policy.**
-   Free, and clean inside an organisation that manages its own machines.
-   Useless for anyone downloading the file from outside it.
-3. **OV code-signing certificate** (~€200–400/year). Since the 2023 CA/Browser
-   Forum baseline the private key must live on a hardware token or a cloud HSM,
-   which complicates automated builds. SmartScreen reputation is *not*
-   immediate — it accrues as copies are downloaded and run, so early users may
-   still see the warning.
-4. **EV code-signing certificate** (~€400–700/year). Grants SmartScreen
-   reputation immediately. This is the only option that removes the warning
-   from the first download onwards.
+Choix notables :
 
-Signing is wired in but disabled by default. Set `SIGNTOOL` and `SIGN_ARGS` in
-the environment and `build.cmd` signs both executables before packaging:
+- `ArchitecturesAllowed` vaut `x64compatible` (posé implicitement par
+  `SetupArchitecture`), ce qui couvre Windows 11 Arm64 exécutant du x64 en
+  émulation. L'identifiant `x64` nu est déprécié et exclurait ces machines.
+- `PrivilegesRequired=lowest` avec choix par dialogue : un opérateur sans droits
+  administrateur peut installer, l'application n'écrivant que dans le registre
+  utilisateur.
+- `MinVersion=10.0`, car PyQt6 ne démarre pas sur Windows 7 et le défaut d'Inno
+  (`6.1sp1`) laisserait l'installateur s'exécuter quand même.
+- La portée d'enregistrement du menu contextuel suit le mode d'installation. Une
+  installation par utilisateur écrit dans `HKEY_CURRENT_USER` ; une installation
+  administrative est élevée, si bien que `HKEY_CURRENT_USER` désignerait la
+  ruche de l'*administrateur* et non celle de l'opérateur — le menu serait
+  enregistré pour un compte que personne n'utilise, et une désinstallation
+  élevée ne retrouverait jamais les clés de l'opérateur. Les installations
+  administratives écrivent donc dans `HKEY_LOCAL_MACHINE`.
+
+  L'alternative apparemment évidente, `runasoriginaluser`, ne fonctionne pas :
+  elle n'est valide que dans `[Run]`, et il n'existe aucun équivalent pour
+  `[UninstallRun]` — la fonction Pascal `ExecAsOriginalUser` est explicitement
+  non supportée à la désinstallation.
+- Le désinstalleur balaie les deux portées avant de supprimer les fichiers.
+
+### Signature de code et SmartScreen
+
+Les métadonnées de version **ne satisfont pas** SmartScreen. Les deux mécanismes
+sont sans rapport : Windows Defender SmartScreen vérifie une signature
+Authenticode et la réputation attachée au certificat. Un exécutable non signé
+déclenche l'écran bleu *« Windows a protégé votre ordinateur »* au premier
+lancement, quelle que soit la qualité de sa ressource de version, et l'opérateur
+doit cliquer *Informations complémentaires → Exécuter quand même*.
+
+Ce que la ressource de version apporte réellement : un onglet Propriétés
+correct, une entrée saine dans Programmes et fonctionnalités, une identification
+exploitable par les inventaires logiciels, et un signal heuristique de moins
+pour les antivirus.
+
+Les options réelles, par coût croissant :
+
+1. **Rien.** Documenter le clic *Exécuter quand même*. Parfaitement viable pour
+   une diffusion à un groupe prévenu.
+2. **Certificat auto-signé déployé en Éditeurs approuvés par GPO.** Gratuit et
+   propre dans un parc géré. Inutile hors de ce parc.
+3. **Certificat OV** (~200–400 €/an). Depuis la baseline CA/Browser Forum de
+   2023, la clé privée doit résider sur un token matériel ou un HSM cloud. La
+   réputation SmartScreen n'est *pas* immédiate : elle s'accumule avec les
+   téléchargements.
+4. **Certificat EV** (~400–700 €/an). Réputation immédiate. Seule option qui
+   supprime l'avertissement dès le premier téléchargement.
+
+La signature est câblée mais désactivée. Définir `SIGNTOOL` et `SIGN_ARGS` dans
+l'environnement suffit :
 
 ```
 set SIGNTOOL=C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe
@@ -260,53 +360,33 @@ set SIGN_ARGS=/fd sha256 /tr http://timestamp.digicert.com /td sha256 /a
 build.cmd full
 ```
 
-For the installer itself, configure a Sign Tool in the Inno Setup IDE and
-uncomment `SignTool` and `SignedUninstaller` in the `.iss`. `SignedUninstaller`
-is not optional if you sign at all: the uninstaller is generated on the target
-machine at install time, so signing the installer beforehand does not cover it.
+Pour l'installateur, configurer un Sign Tool dans l'IDE Inno Setup et
+décommenter `SignTool` et `SignedUninstaller` dans le `.iss`.
+`SignedUninstaller` n'est pas facultatif si l'on signe : le désinstalleur est
+généré sur la machine cible à l'installation et n'est donc pas couvert par la
+signature de l'installateur.
 
-Two build choices already reduce false positives regardless of signing: the
-build is one-folder rather than one-file, because one-file executables unpack
-themselves into `%TEMP%` at every launch and that behaviour is itself a
-heuristic trigger; and UPX compression is off, since several engines flag
-UPX-packed binaries on sight.
+Deux choix réduisent déjà les faux positifs indépendamment de la signature : le
+build est en un dossier plutôt qu'un fichier unique — un exécutable *onefile* se
+décompresse dans `%TEMP%` à chaque lancement, comportement heuristiquement
+suspect en soi — et la compression UPX est désactivée, plusieurs moteurs
+signalant les binaires packés UPX à vue.
 
-### Installer
+---
 
-`installer\pdfteleporter.iss` requires **Inno Setup 7**. It uses
-`SetupArchitecture=x64`, which does not exist in Inno Setup 6 — that version
-fails with an unknown-directive error rather than quietly building something
-else.
+## Conventions de langue
 
-Notable choices:
+L'interface, le menu contextuel et les messages destinés à l'opérateur sont en
+français : cet outil est employé par des opérateurs français des transmissions
+de sécurité civile, et une interface anglaise y devient une source d'hésitation
+sous contrainte de temps.
 
-- `ArchitecturesAllowed` defaults to `x64compatible` (set implicitly by
-  `SetupArchitecture`), which matches Arm64 Windows 11 running x64 under
-  emulation. The bare `x64` identifier is deprecated and would exclude those
-  machines.
-- `PrivilegesRequired=lowest` with `PrivilegesRequiredOverridesAllowed=dialog`,
-  so an operator without administrator rights can still install. The
-  application needs none: it writes only under `HKEY_CURRENT_USER`.
-- `MinVersion=10.0`, because PyQt6 will not start on Windows 7 and the Inno
-  default of `6.1sp1` would let Setup run anyway.
-- `WizardStyle=modern dynamic`, so the installer follows the system light/dark
-  setting like the application does.
-- The context-menu registration scope follows the install mode. A per-user
-  install writes under `HKEY_CURRENT_USER`; an administrative install is
-  elevated, so `HKEY_CURRENT_USER` would be the *administrator's* hive rather
-  than the operator's — the menu would be registered for an account nobody
-  uses, and an elevated uninstall could never find the operator's keys to
-  remove them. Administrative installs therefore write under
-  `HKEY_LOCAL_MACHINE`, which every account sees.
-
-  The obvious-looking alternative, `runasoriginaluser`, does not work: it is
-  valid only in `[Run]`, and there is no equivalent for `[UninstallRun]` — the
-  Pascal `ExecAsOriginalUser` is explicitly unsupported at uninstall time.
-  Selecting the scope by install mode solves both halves at once.
-- The uninstaller sweeps both scopes before deleting files, so Explorer is not
-  left with entries pointing at a deleted executable, and keys from an earlier
-  install in the other mode are cleared too.
+Le code, les commentaires et les identifiants restent en anglais. Les
+identifiants qui circulent en ligne de commande ou dans les archives (`low`,
+`struct`, les clés de débit radio) ne sont jamais des libellés d'affichage :
+reformuler un texte visible ne doit pas casser une commande ni une archive.
 
 ## Licence
 
-GNU GPL v3, inherited from the original implementation. PyMuPDF is AGPL v3.
+GNU GPL v3, héritée de l'implémentation originale de F1GBD. PyMuPDF est sous
+AGPL v3.
