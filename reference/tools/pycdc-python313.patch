@@ -1,0 +1,609 @@
+diff --git a/ASTNode.h b/ASTNode.h
+index 98760db..34b413f 100644
+--- a/ASTNode.h
++++ b/ASTNode.h
+@@ -21,7 +21,7 @@ public:
+         NODE_KW_NAMES_MAP,
+ 
+         // Empty node types
+-        NODE_LOCALS,
++        NODE_LOCALS, NODE_SENTINEL,
+     };
+ 
+     ASTNode(int type = NODE_INVALID) : m_refs(), m_type(type), m_processed() { }
+@@ -61,6 +61,16 @@ public:
+ };
+ 
+ 
++/* Python 3.12+ inlines comprehensions into the enclosing code object.
++   LOAD_FAST_AND_CLEAR pushes the saved outer value of the loop variable,
++   which is pure bookkeeping and must never reach the generated source.
++   This placeholder marks that slot so SWAP/STORE can recognise it. */
++class ASTSentinel : public ASTNode {
++public:
++    ASTSentinel() : ASTNode(NODE_SENTINEL) { }
++};
++
++
+ class ASTNodeList : public ASTNode {
+ public:
+     typedef std::list<PycRef<ASTNode>> list_t;
+@@ -257,6 +267,11 @@ public:
+     const defarg_t& defargs() const { return m_defargs; }
+     const defarg_t& kwdefargs() const { return m_kwdefargs; }
+ 
++    /* Python 3.13+: defaults are attached after MAKE_FUNCTION via
++       SET_FUNCTION_ATTRIBUTE, so they must be settable post-construction. */
++    defarg_t& mutableDefargs() { return m_defargs; }
++    defarg_t& mutableKwDefargs() { return m_kwdefargs; }
++
+ private:
+     PycRef<ASTNode> m_code;
+     defarg_t m_defargs;
+@@ -644,10 +659,16 @@ class ASTComprehension : public ASTNode {
+ public:
+     typedef std::list<PycRef<ASTIterBlock>> generator_t;
+ 
+-    ASTComprehension(PycRef<ASTNode> result)
+-        : ASTNode(NODE_COMPREHENSION), m_result(std::move(result)) { }
++    enum Kind { COMP_LIST, COMP_SET, COMP_DICT };
++
++    ASTComprehension(PycRef<ASTNode> result, Kind kind = COMP_LIST,
++                     PycRef<ASTNode> key = nullptr)
++        : ASTNode(NODE_COMPREHENSION), m_result(std::move(result)),
++          m_key(std::move(key)), m_kind(kind) { }
+ 
+     PycRef<ASTNode> result() const { return m_result; }
++    PycRef<ASTNode> key() const { return m_key; }
++    Kind kind() const { return m_kind; }
+     generator_t generators() const { return m_generators; }
+ 
+     void addGenerator(PycRef<ASTIterBlock> gen) {
+@@ -656,6 +677,8 @@ public:
+ 
+ private:
+     PycRef<ASTNode> m_result;
++    PycRef<ASTNode> m_key;
++    Kind m_kind;
+     generator_t m_generators;
+ 
+ };
+diff --git a/ASTree.cpp b/ASTree.cpp
+index f837152..4a32d2a 100644
+--- a/ASTree.cpp
++++ b/ASTree.cpp
+@@ -3,6 +3,7 @@
+ #include <stdexcept>
+ #include <unordered_set>
+ #include "ASTree.h"
++#include <deque>
+ #include "FastStack.h"
+ #include "pyc_numeric.h"
+ #include "bytecode.h"
+@@ -96,11 +97,16 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+     std::vector<PycExceptionTableEntry> exception_entries;
+     size_t next_exception_entry = 0;
+ 
++    /* Python 3.13 fuses pairs of local-variable ops into single
++       superinstructions. Splitting them back into their components lets the
++       ordinary handlers (tuple unpacking in particular) work unchanged. */
++    std::deque<std::pair<int, int>> pending_ops;
++
+     if (mod->verCompare(3, 11) >= 0) {
+         exception_entries = code->exceptionTableEntries();
+     }
+ 
+-    while (!source.atEof()) {
++    while (!source.atEof() || !pending_ops.empty()) {
+ #if defined(BLOCK_DEBUG) || defined(STACK_DEBUG)
+         fprintf(stderr, "%-7d", pos);
+     #ifdef STACK_DEBUG
+@@ -193,7 +199,23 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+         }
+ 
+         curpos = pos;
+-        bc_next(source, mod, opcode, operand, pos);
++        if (!pending_ops.empty()) {
++            opcode = pending_ops.front().first;
++            operand = pending_ops.front().second;
++            pending_ops.pop_front();
++        } else {
++            bc_next(source, mod, opcode, operand, pos);
++
++            if (opcode == Pyc::STORE_FAST_STORE_FAST_A) {
++                pending_ops.emplace_back(Pyc::STORE_FAST_A, operand & 0xF);
++                opcode = Pyc::STORE_FAST_A;
++                operand = operand >> 4;
++            } else if (opcode == Pyc::STORE_FAST_LOAD_FAST_A) {
++                pending_ops.emplace_back(Pyc::LOAD_FAST_A, operand & 0xF);
++                opcode = Pyc::STORE_FAST_A;
++                operand = operand >> 4;
++            }
++        }
+ 
+         if (need_try && opcode != Pyc::SETUP_EXCEPT_A) {
+             need_try = false;
+@@ -507,10 +529,40 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 stack.push(new ASTKwNamesMap(kwparamList));
+             }
+             break;
++        case Pyc::CALL_KW_A:
++        case Pyc::INSTRUMENTED_CALL_KW_A:
+         case Pyc::CALL_A:
+         case Pyc::CALL_FUNCTION_A:
+         case Pyc::INSTRUMENTED_CALL_A:
+             {
++                if (opcode == Pyc::CALL_KW_A || opcode == Pyc::INSTRUMENTED_CALL_KW_A) {
++                    /* Python 3.13 replaced the preceding KW_NAMES with a
++                       keyword-name tuple pushed on top of the arguments.
++                       Normalize it into the ASTKwNamesMap the CALL path
++                       already understands. */
++                    PycRef<ASTNode> namesNode = stack.top();
++                    stack.pop();
++
++                    std::vector<PycRef<ASTNode>> keys;
++                    if (namesNode.type() == ASTNode::NODE_OBJECT &&
++                            (namesNode.cast<ASTObject>()->object().type() == PycObject::TYPE_TUPLE || namesNode.cast<ASTObject>()->object().type() == PycObject::TYPE_SMALL_TUPLE)) {
++                        PycRef<PycTuple> tup =
++                                namesNode.cast<ASTObject>()->object().cast<PycTuple>();
++                        for (const auto& key : tup->values())
++                            keys.push_back(new ASTObject(key));
++                    } else if (namesNode.type() == ASTNode::NODE_TUPLE) {
++                        for (const auto& key : namesNode.cast<ASTTuple>()->values())
++                            keys.push_back(key);
++                    }
++
++                    ASTKwNamesMap kwparamList;
++                    for (size_t i = 0; i < keys.size(); i++) {
++                        kwparamList.add(keys[keys.size() - i - 1], stack.top());
++                        stack.pop();
++                    }
++                    stack.push(new ASTKwNamesMap(kwparamList));
++                }
++
+                 int kwparams = (operand & 0xFF00) >> 8;
+                 int pparams = (operand & 0xFF);
+                 ASTCall::kwparam_t kwparamList;
+@@ -537,6 +589,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 stack.pop();
+                 PycRef<ASTNode> function = stack.top();
+                 stack.pop();
++                /* Python 3.11+ pushes a NULL right after __build_class__;
++                   step over it so the marker below is still recognised. */
++                while (!stack.empty() && stack.top() == nullptr)
++                    stack.pop();
+                 PycRef<ASTNode> loadbuild = stack.top();
+                 stack.pop();
+                 int loadbuild_type = loadbuild.type();
+@@ -600,7 +656,12 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 }
+                 PycRef<ASTNode> func = stack.top();
+                 stack.pop();
+-                if ((opcode == Pyc::CALL_A || opcode == Pyc::INSTRUMENTED_CALL_A) &&
++                if (func == nullptr) {
++                    /* Python 3.13 emits PUSH_NULL after loading the callable,
++                       so the NULL ends up directly under the arguments. */
++                    func = stack.top();
++                    stack.pop();
++                } else if ((opcode == Pyc::CALL_A || opcode == Pyc::INSTRUMENTED_CALL_A) &&
+                         stack.top() == nullptr) {
+                     stack.pop();
+                 }
+@@ -1078,6 +1139,47 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 stack.push(new ASTFormattedValue(val, conversion_flag, format_spec));
+             }
+             break;
++        case Pyc::CONVERT_VALUE_A:
++            {
++                /* Python 3.13: applies !s / !r / !a ahead of FORMAT_SIMPLE. */
++                PycRef<ASTNode> val = stack.top();
++                stack.pop();
++                auto conversion_flag = static_cast<ASTFormattedValue::ConversionFlag>(
++                        operand & ASTFormattedValue::CONVERSION_MASK);
++                stack.push(new ASTFormattedValue(val, conversion_flag, nullptr));
++            }
++            break;
++        case Pyc::FORMAT_SIMPLE:
++            {
++                /* Python 3.13: plain {expr} with no format spec. If a
++                   CONVERT_VALUE already wrapped the value, keep that node. */
++                PycRef<ASTNode> val = stack.top();
++                if (val.type() == ASTNode::NODE_FORMATTEDVALUE)
++                    break;
++                stack.pop();
++                stack.push(new ASTFormattedValue(val, ASTFormattedValue::NONE, nullptr));
++            }
++            break;
++        case Pyc::FORMAT_WITH_SPEC:
++            {
++                /* Python 3.13: {expr:spec}, spec on top of the value. */
++                PycRef<ASTNode> format_spec = stack.top();
++                stack.pop();
++                PycRef<ASTNode> val = stack.top();
++                stack.pop();
++
++                auto conversion_flag = ASTFormattedValue::NONE;
++                if (val.type() == ASTNode::NODE_FORMATTEDVALUE) {
++                    PycRef<ASTFormattedValue> inner = val.cast<ASTFormattedValue>();
++                    conversion_flag = inner->conversion();
++                    val = inner->val();
++                }
++
++                auto flags = static_cast<ASTFormattedValue::ConversionFlag>(
++                        conversion_flag | ASTFormattedValue::HAVE_FMT_SPEC);
++                stack.push(new ASTFormattedValue(val, flags, format_spec));
++            }
++            break;
+         case Pyc::GET_AWAITABLE:
+             {
+                 PycRef<ASTNode> object = stack.top();
+@@ -1120,6 +1222,26 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 stack.push(new ASTCompare(left, right, operand ? ASTCompare::CMP_IS_NOT : ASTCompare::CMP_IS));
+             }
+             break;
++        case Pyc::POP_JUMP_IF_NONE_A:
++        case Pyc::POP_JUMP_IF_NOT_NONE_A:
++        case Pyc::INSTRUMENTED_POP_JUMP_IF_NONE_A:
++        case Pyc::INSTRUMENTED_POP_JUMP_IF_NOT_NONE_A:
++            {
++                /* Python 3.12+ folds `x is None` / `x is not None` tests into
++                   a dedicated jump. Rebuild the comparison explicitly and
++                   fall through to the generic conditional-jump handling. */
++                const bool wantNone = (opcode == Pyc::POP_JUMP_IF_NONE_A
++                        || opcode == Pyc::INSTRUMENTED_POP_JUMP_IF_NONE_A);
++
++                PycRef<ASTNode> value = stack.top();
++                stack.pop();
++                stack.push(new ASTCompare(value, new ASTObject(Pyc_None),
++                        wantNone ? ASTCompare::CMP_IS : ASTCompare::CMP_IS_NOT));
++
++                /* The jump is taken when the rebuilt comparison is true. */
++                opcode = Pyc::POP_JUMP_IF_TRUE_A;
++            }
++            /* fall through */
+         case Pyc::JUMP_IF_FALSE_A:
+         case Pyc::JUMP_IF_TRUE_A:
+         case Pyc::JUMP_IF_FALSE_OR_POP_A:
+@@ -1507,6 +1629,42 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 }
+             }
+             break;
++        case Pyc::SET_ADD:
++        case Pyc::SET_ADD_A:
++            {
++                PycRef<ASTNode> value = stack.top();
++                stack.pop();
++
++                PycRef<ASTNode> set = stack.top();
++
++                if (curblock->blktype() == ASTBlock::BLK_FOR
++                        && curblock.cast<ASTIterBlock>()->isComprehension()) {
++                    stack.pop();
++                    stack.push(new ASTComprehension(value, ASTComprehension::COMP_SET));
++                } else {
++                    stack.push(new ASTSubscr(set, value));
++                }
++            }
++            break;
++        case Pyc::MAP_ADD_A:
++            {
++                /* Python 3.8+: value on top, key below it. */
++                PycRef<ASTNode> value = stack.top();
++                stack.pop();
++                PycRef<ASTNode> key = stack.top();
++                stack.pop();
++
++                PycRef<ASTNode> map = stack.top();
++
++                if (curblock->blktype() == ASTBlock::BLK_FOR
++                        && curblock.cast<ASTIterBlock>()->isComprehension()) {
++                    stack.pop();
++                    stack.push(new ASTComprehension(value, ASTComprehension::COMP_DICT, key));
++                } else {
++                    stack.push(new ASTSubscr(map, key));
++                }
++            }
++            break;
+         case Pyc::SET_UPDATE_A:
+             {
+                 PycRef<ASTNode> rhs = stack.top();
+@@ -1581,6 +1739,14 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 }
+             }
+             break;
++        case Pyc::LOAD_ASSERTION_ERROR:
++            {
++                /* Python 3.9+ pushes the builtin directly for `assert`. */
++                PycRef<PycString> name = new PycString(PycObject::TYPE_STRING);
++                name->setValue("AssertionError");
++                stack.push(new ASTName(name));
++            }
++            break;
+         case Pyc::LOAD_BUILD_CLASS:
+             stack.push(new ASTLoadBuildClass(new PycObject()));
+             break;
+@@ -1603,6 +1769,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 }
+             }
+             break;
++        case Pyc::DELETE_DEREF_A:
++            curblock->append(new ASTDelete(
++                    new ASTName(code->getCellVar(mod, operand))));
++            break;
+         case Pyc::LOAD_DEREF_A:
+         case Pyc::LOAD_CLASSDEREF_A:
+             stack.push(new ASTName(code->getCellVar(mod, operand)));
+@@ -1613,6 +1783,21 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+             else
+                 stack.push(new ASTName(code->getLocal(operand)));
+             break;
++        case Pyc::COPY_FREE_VARS_A:
++            /* Python 3.11+ closure prologue. No source-level effect. */
++            break;
++        case Pyc::RETURN_GENERATOR:
++            /* Python 3.11+ marks generator/coroutine entry. The `yield`
++               statements in the body already convey this. */
++            break;
++        case Pyc::LOAD_FAST_CHECK_A:
++            /* Same as LOAD_FAST, but raises if unbound. */
++            stack.push(new ASTName(code->getLocal(operand)));
++            break;
++        case Pyc::MAKE_CELL_A:
++            /* Python 3.11+ prologue bookkeeping for closure variables.
++               No source-level effect. */
++            break;
+         case Pyc::LOAD_FAST_LOAD_FAST_A:
+             stack.push(new ASTName(code->getLocal(operand >> 4)));
+             stack.push(new ASTName(code->getLocal(operand & 0xF)));
+@@ -1647,6 +1832,55 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+         case Pyc::LOAD_NAME_A:
+             stack.push(new ASTName(code->getName(operand)));
+             break;
++        case Pyc::MAKE_FUNCTION:
++            {
++                /* Python 3.13+: MAKE_FUNCTION takes no operand. Defaults,
++                   kwdefaults, annotations and closure are attached afterwards
++                   by SET_FUNCTION_ATTRIBUTE. */
++                PycRef<ASTNode> fun_code = stack.top();
++                stack.pop();
++
++                ASTFunction::defarg_t defArgs, kwDefArgs;
++                stack.push(new ASTFunction(fun_code, defArgs, kwDefArgs));
++            }
++            break;
++        case Pyc::SET_FUNCTION_ATTRIBUTE_A:
++            {
++                /* Stack layout: [attr_value, func] with func on top. */
++                PycRef<ASTNode> func = stack.top();
++                stack.pop();
++                PycRef<ASTNode> attr = stack.top();
++                stack.pop();
++
++                if (func.type() == ASTNode::NODE_FUNCTION &&
++                        (operand == 0x01 || operand == 0x02)) {
++                    PycRef<ASTFunction> fn = func.cast<ASTFunction>();
++                    ASTFunction::defarg_t& target = (operand == 0x01)
++                            ? fn->mutableDefargs()
++                            : fn->mutableKwDefargs();
++
++                    if (attr.type() == ASTNode::NODE_TUPLE) {
++                        for (const auto& val : attr.cast<ASTTuple>()->values())
++                            target.push_back(val);
++                    } else if (attr.type() == ASTNode::NODE_MAP) {
++                        /* kwdefaults arrive as a dict {name: value}; only the
++                           values are needed, the names come from the code. */
++                        for (const auto& val : attr.cast<ASTMap>()->values())
++                            target.push_back(val.second);
++                    } else if (attr.type() == ASTNode::NODE_OBJECT &&
++                               (attr.cast<ASTObject>()->object().type() == PycObject::TYPE_TUPLE ||
++                                attr.cast<ASTObject>()->object().type() == PycObject::TYPE_SMALL_TUPLE)) {
++                        PycRef<PycTuple> tup = attr.cast<ASTObject>()->object().cast<PycTuple>();
++                        for (const auto& val : tup->values())
++                            target.push_back(new ASTObject(val));
++                    } else {
++                        target.push_back(attr);
++                    }
++                }
++
++                stack.push(func);
++            }
++            break;
+         case Pyc::MAKE_CLOSURE_A:
+         case Pyc::MAKE_FUNCTION_A:
+             {
+@@ -1675,6 +1909,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 stack.push(new ASTFunction(fun_code, defArgs, kwDefArgs));
+             }
+             break;
++        case Pyc::TO_BOOL:
++            /* Python 3.13 normalizes truthiness explicitly before branching.
++               The source-level expression is unchanged, so this is a no-op. */
++            break;
+         case Pyc::NOP:
+             break;
+         case Pyc::POP_BLOCK:
+@@ -1775,7 +2013,30 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+             }
+             break;
+         case Pyc::POP_EXCEPT:
+-            /* Do nothing. */
++            /* Python 3.11+ marks the end of an except handler body here.
++               Without this the handler never closes and every subsequent
++               statement ends up nested one level deeper. */
++            if (curblock->blktype() == ASTBlock::BLK_EXCEPT) {
++                PycRef<ASTBlock> prev = curblock;
++                blocks.pop();
++                curblock = blocks.top();
++
++                if (!stack_hist.empty()) {
++                    stack = stack_hist.top();
++                    stack_hist.pop();
++                }
++
++                if (prev->size() != 0)
++                    curblock->append(prev.cast<ASTNode>());
++
++                if (curblock->blktype() == ASTBlock::BLK_CONTAINER
++                        && !curblock.cast<ASTContainerBlock>()->hasFinally()) {
++                    PycRef<ASTBlock> cont = curblock;
++                    blocks.pop();
++                    curblock = blocks.top();
++                    curblock->append(cont.cast<ASTNode>());
++                }
++            }
+             break;
+         case Pyc::PUSH_EXC_INFO:
+             /* Python 3.11+: pushes exception info tuple. We ignore here to keep decompilation going. */
+@@ -2207,6 +2468,14 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+             break;
+         case Pyc::STORE_FAST_A:
+             {
++                /* Epilogue of an inlined comprehension: restore the saved
++                   outer binding. Emits nothing. */
++                if (!stack.empty() && stack.top() != nullptr &&
++                        stack.top().type() == ASTNode::NODE_SENTINEL) {
++                    stack.pop();
++                    break;
++                }
++
+                 if (unpack) {
+                     PycRef<ASTNode> name;
+ 
+@@ -2574,6 +2843,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+             }
+             break;
+         case Pyc::YIELD_VALUE:
++        case Pyc::YIELD_VALUE_A:
+         case Pyc::INSTRUMENTED_YIELD_VALUE_A:
+             {
+                 PycRef<ASTNode> value = stack.top();
+@@ -2581,6 +2851,46 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+                 curblock->append(new ASTReturn(value, ASTReturn::YIELD));
+             }
+             break;
++        case Pyc::CALL_INTRINSIC_1_A:
++            {
++                /* Python 3.12 folded several rare operations behind a single
++                   opcode selected by the operand. */
++                switch (operand) {
++                case 2:     /* INTRINSIC_IMPORT_STAR */
++                    {
++                        PycRef<ASTNode> import = stack.top();
++                        stack.pop();
++                        curblock->append(new ASTStore(import, nullptr));
++                    }
++                    break;
++                case 5:     /* INTRINSIC_UNARY_POSITIVE */
++                    {
++                        PycRef<ASTNode> value = stack.top();
++                        stack.pop();
++                        stack.push(new ASTUnary(value, ASTUnary::UN_POSITIVE));
++                    }
++                    break;
++                case 6:     /* INTRINSIC_LIST_TO_TUPLE */
++                    {
++                        PycRef<ASTNode> value = stack.top();
++                        stack.pop();
++                        if (value.type() == ASTNode::NODE_LIST) {
++                            ASTTuple::value_t values;
++                            for (const auto& item : value.cast<ASTList>()->values())
++                                values.push_back(item);
++                            stack.push(new ASTTuple(values));
++                        } else {
++                            stack.push(value);
++                        }
++                    }
++                    break;
++                default:
++                    /* STOPITERATION_ERROR, ASYNC_GEN_WRAP, typing intrinsics:
++                       no source-level representation of their own. */
++                    break;
++                }
++            }
++            break;
+         case Pyc::SETUP_ANNOTATIONS:
+             variable_annotations = true;
+             break;
+@@ -2601,8 +2911,35 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
+         case Pyc::GEN_START_A:
+             stack.pop();
+             break;
++        case Pyc::LOAD_FAST_AND_CLEAR_A:
++            /* Python 3.12+ inlined comprehension prologue: saves and clears
++               the outer binding of the loop variable. Nothing to emit. */
++            stack.push(new ASTSentinel());
++            break;
+         case Pyc::SWAP_A:
+             {
++                /* When a comprehension sentinel is in play, SWAP is genuine
++                   stack shuffling, not the tuple-unpack idiom below. */
++                {
++                    std::vector<PycRef<ASTNode>> window;
++                    window.reserve(operand);
++                    bool hasSentinel = false;
++                    for (int i = 0; i < operand; i++) {
++                        PycRef<ASTNode> item = stack.top();
++                        stack.pop();
++                        if (item != nullptr && item.type() == ASTNode::NODE_SENTINEL)
++                            hasSentinel = true;
++                        window.push_back(item);
++                    }
++                    /* window[0] == TOS ... window[operand-1] == deepest */
++                    if (hasSentinel)
++                        std::swap(window[0], window[operand - 1]);
++                    for (int i = operand - 1; i >= 0; i--)
++                        stack.push(window[i]);
++                    if (hasSentinel)
++                        break;
++                }
++
+                 unpack = operand;
+                 ASTTuple::value_t values;
+                 ASTTuple::value_t next_tuple;
+@@ -3004,7 +3341,12 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
+                 print_const(pyc_output, val.cast<ASTObject>()->object(), mod, F_STRING_QUOTE);
+                 break;
+             default:
+-                fprintf(stderr, "Unsupported node type %d in NODE_JOINEDSTR\n", val.type());
++                /* Python 3.13 can leave a bare expression in the join when
++                   FORMAT_SIMPLE was elided; render it as a substitution. */
++                pyc_output << "{";
++                print_src(val, mod, pyc_output);
++                pyc_output << "}";
++                break;
+             }
+         }
+         pyc_output << F_STRING_QUOTE;
+@@ -3052,7 +3394,12 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
+         {
+             PycRef<ASTComprehension> comp = node.cast<ASTComprehension>();
+ 
+-            pyc_output << "[ ";
++            const bool isList = (comp->kind() == ASTComprehension::COMP_LIST);
++            pyc_output << (isList ? "[ " : "{ ");
++            if (comp->kind() == ASTComprehension::COMP_DICT) {
++                print_src(comp->key(), mod, pyc_output);
++                pyc_output << ": ";
++            }
+             print_src(comp->result(), mod, pyc_output);
+ 
+             for (const auto& gen : comp->generators()) {
+@@ -3065,7 +3412,7 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
+                     print_src(gen->condition(), mod, pyc_output);
+                 }
+             }
+-            pyc_output << " ]";
++            pyc_output << (isList ? " ]" : " }");
+         }
+         break;
+     case ASTNode::NODE_MAP:
+@@ -3555,6 +3902,9 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
+             //pyc_output << ")";
+         }
+         break;
++    case ASTNode::NODE_SENTINEL:
++        /* Comprehension bookkeeping slot: nothing to emit. */
++        break;
+     default:
+         pyc_output << "<NODE:" << node->type() << ">";
+         fprintf(stderr, "Unsupported Node type: %d\n", node->type());
