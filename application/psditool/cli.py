@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 
-from . import engine, format as psdi
+from . import __version__, engine, format as psdi
 from .presets import (
     MODE_LABELS, MODE_PACKET_1200, MODE_VARA_FM_NARROW, MODE_VARA_HF,
     QUALITY_LABELS,
@@ -161,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="psditool",
         description="Convertit des documents PDF en archives radio .psdi et inversement.",
     )
+    parser.add_argument("--version", action="version",
+                        version=f"PDF Teleporter {__version__}")
     parser.add_argument("--verbose", action="store_true",
                         help="journaliser l'activité du moteur sur stderr")
     parser.add_argument("--quiet", action="store_true",

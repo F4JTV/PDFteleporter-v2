@@ -63,6 +63,24 @@ class PsdiError(Exception):
     """Raised when an archive cannot be parsed or is internally inconsistent."""
 
 
+# --- Limits on untrusted input ---------------------------------------------
+# An archive arriving over the air is untrusted input. Every length in the
+# container is attacker-controlled, and LZMA expands very aggressively: a
+# 30 kB file can decompress to 200 MB, which was allocated in full before any
+# parsing rejected it. The ceilings below are far above anything a real
+# document produces -- a 500-page SITREP manifest compresses to a few hundred
+# kilobytes -- so they never interfere with legitimate traffic.
+#
+# These are decode-side only. The encoder is untouched, so archives produced
+# here are byte-identical to before and remain readable by other
+# implementations.
+MAX_ARCHIVE_SIZE = 64 * 1024 * 1024
+MAX_MANIFEST_SIZE = 32 * 1024 * 1024
+MAX_PAYLOAD_SIZE = 32 * 1024 * 1024
+MAX_PAGES = 2000
+MAX_IMAGES = 5000
+
+
 def _lzma_compress(data: bytes, preset: int) -> bytes:
     return lzma.compress(
         data,
@@ -77,8 +95,46 @@ def _lzma_compress_text(data: bytes) -> bytes:
                          filters=_LZMA_TEXT_FILTERS)
 
 
-def _lzma_decompress(data: bytes) -> bytes:
-    return lzma.decompress(data, format=lzma.FORMAT_RAW, filters=_LZMA_DECODE_FILTERS)
+def _lzma_decompress(data: bytes, limit: int = MAX_PAYLOAD_SIZE) -> bytes:
+    """Decompress a raw LZMA2 stream, refusing to exceed `limit` bytes.
+
+    LZMADecompressor is used rather than lzma.decompress because it can be
+    fed incrementally and stopped: decompress(max_length=...) never allocates
+    more than asked, so a decompression bomb is rejected after one chunk
+    instead of after the whole expansion.
+    """
+    decompressor = lzma.LZMADecompressor(
+        format=lzma.FORMAT_RAW, filters=_LZMA_DECODE_FILTERS
+    )
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while not decompressor.eof:
+            chunk = decompressor.decompress(b"" if chunks else data,
+                                            max_length=1024 * 1024)
+            if not chunk and not decompressor.needs_input:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise PsdiError(
+                    f"Decompressed data exceeds {limit} bytes; "
+                    f"refusing to continue"
+                )
+            chunks.append(chunk)
+            if decompressor.needs_input:
+                break
+    except lzma.LZMAError as exc:
+        raise PsdiError(f"Corrupt compressed stream: {exc}") from exc
+    return b"".join(chunks)
+
+
+def _need(data: bytes, offset: int, length: int, what: str) -> None:
+    """Refuse to read past the end of the archive."""
+    if offset < 0 or length < 0 or offset + length > len(data):
+        raise PsdiError(
+            f"Truncated archive: {what} needs {length} bytes at offset "
+            f"{offset}, only {max(0, len(data) - offset)} available"
+        )
 
 
 def pack_payload(raw: bytes, preset: int) -> tuple[int, bytes]:
@@ -115,6 +171,11 @@ class ImageArchive:
 
 def peek_version(data: bytes) -> int:
     """Return the archive version, raising if this is not a .psdi at all."""
+    if len(data) > MAX_ARCHIVE_SIZE:
+        raise PsdiError(
+            f"Archive is {len(data)} bytes, above the "
+            f"{MAX_ARCHIVE_SIZE} byte ceiling"
+        )
     if len(data) < 6:
         raise PsdiError("Archive too short")
     if data[:4] != ARCHIVE_MAGIC:
@@ -127,7 +188,9 @@ def validate(data: bytes) -> dict:
 
     Returns a report rather than raising, because the caller is usually
     showing the operator whether a file that just arrived over the air is
-    intact enough to be worth rebuilding.
+    intact enough to be worth rebuilding. Every rejection reason is a
+    PsdiError message, so the report says what is wrong rather than surfacing
+    an LZMAError or a struct.error.
     """
     report = {
         "valid": False,
@@ -146,26 +209,25 @@ def validate(data: bytes) -> dict:
 
     try:
         if version == ARCHIVE_VERSION_STRUCT:
-            checksum, manifest_size = struct.unpack_from("<II", data, 6)
-            manifest_bytes = _lzma_decompress(data[14 : 14 + manifest_size])
-            report["checksum_ok"] = (
-                zlib.crc32(manifest_bytes) & 0xFFFFFFFF
-            ) == checksum
-            manifest = json.loads(manifest_bytes.decode("utf-8"))
-            report["pages"] = len(manifest.get("pages", []))
+            # Parsing the whole thing is what the caller will do next anyway,
+            # and it is the only way to catch a manifest that is internally
+            # consistent but references pages that do not exist.
+            parsed = read_struct(data)
+            report["checksum_ok"] = parsed.crc_ok
+            report["pages"] = len(parsed.manifest["pages"])
             report["valid"] = True
         elif version == ARCHIVE_VERSION_IMAGE:
-            nb_pages = struct.unpack_from("<H", data, 6)[0]
-            report["pages"] = nb_pages
+            parsed_image = read_image(data)
+            report["pages"] = len(parsed_image.pages)
             # There is no manifest to checksum in image mode.
             report["checksum_ok"] = True
-            report["valid"] = 0 < nb_pages < 1000
-            if not report["valid"]:
-                report["error"] = f"Implausible page count: {nb_pages}"
+            report["valid"] = True
         else:
             report["error"] = f"Unsupported version: {version}"
+    except PsdiError as exc:
+        report["error"] = str(exc)
     except Exception as exc:  # noqa: BLE001 - report, never propagate
-        report["error"] = f"Validation failed: {exc}"
+        report["error"] = f"Validation failed: {type(exc).__name__}: {exc}"
 
     return report
 
@@ -197,32 +259,99 @@ def write_struct(manifest: dict, images: dict[str, bytes],
 
 
 def read_struct(data: bytes) -> StructArchive:
-    """Parse a version 1 archive."""
+    """Parse a version 1 archive, rejecting anything inconsistent."""
     pos = 6
+    _need(data, pos, 8, "manifest header")
     checksum, manifest_size = struct.unpack_from("<II", data, pos)
     pos += 8
 
-    manifest_bytes = _lzma_decompress(data[pos : pos + manifest_size])
+    if manifest_size > MAX_MANIFEST_SIZE:
+        raise PsdiError(
+            f"Manifest claims {manifest_size} compressed bytes, above the "
+            f"{MAX_MANIFEST_SIZE} byte ceiling"
+        )
+    _need(data, pos, manifest_size, "manifest")
+
+    manifest_bytes = _lzma_decompress(data[pos : pos + manifest_size],
+                                      MAX_MANIFEST_SIZE)
     pos += manifest_size
 
     crc_ok = (zlib.crc32(manifest_bytes) & 0xFFFFFFFF) == checksum
-    manifest = json.loads(manifest_bytes.decode("utf-8"))
 
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PsdiError(f"Manifest is not valid JSON: {exc}") from exc
+
+    _check_manifest(manifest)
+
+    _need(data, pos, 2, "image count")
     nb_images = struct.unpack_from("<H", data, pos)[0]
     pos += 2
 
+    if nb_images > MAX_IMAGES:
+        raise PsdiError(f"Implausible image count: {nb_images}")
+
     images: dict[str, bytes] = {}
-    for _ in range(nb_images):
+    for index in range(nb_images):
+        _need(data, pos, 7, f"image {index} header")
         xref_id = struct.unpack_from("<H", data, pos)[0]
         pos += 2
         flags = struct.unpack_from("<B", data, pos)[0]
         pos += 1
         size = struct.unpack_from("<I", data, pos)[0]
         pos += 4
+
+        if size > MAX_PAYLOAD_SIZE:
+            raise PsdiError(
+                f"Image {xref_id} claims {size} bytes, above the "
+                f"{MAX_PAYLOAD_SIZE} byte ceiling"
+            )
+        _need(data, pos, size, f"image {xref_id} payload")
+
         images[str(xref_id)] = unpack_payload(flags, data[pos : pos + size])
         pos += size
 
     return StructArchive(manifest=manifest, images=images, crc_ok=crc_ok)
+
+
+def _check_manifest(manifest) -> None:
+    """Cross-check the manifest before anything draws from it.
+
+    The rebuild loop indexes page_sizes by page number. A manifest with more
+    pages than sizes passes the CRC check -- it is internally consistent, just
+    wrong -- and then raises IndexError halfway through building a document.
+    Catching it here means a damaged transmission is reported as such instead
+    of surfacing as a stack trace from deep inside the renderer.
+    """
+    if not isinstance(manifest, dict):
+        raise PsdiError("Manifest is not an object")
+
+    pages = manifest.get("pages")
+    sizes = manifest.get("page_sizes")
+    if not isinstance(pages, list) or not isinstance(sizes, list):
+        raise PsdiError("Manifest is missing its pages or page_sizes list")
+
+    if len(pages) > MAX_PAGES:
+        raise PsdiError(f"Implausible page count: {len(pages)}")
+
+    for page in pages:
+        if not isinstance(page, dict):
+            raise PsdiError("Manifest contains a malformed page entry")
+        number = page.get("pn")
+        if not isinstance(number, int) or not 1 <= number <= len(sizes):
+            raise PsdiError(
+                f"Page number {number!r} has no matching entry in page_sizes "
+                f"({len(sizes)} present)"
+            )
+
+    for size in sizes:
+        if not isinstance(size, dict):
+            raise PsdiError("Manifest contains a malformed page size")
+        width, height = size.get("w"), size.get("h")
+        for value in (width, height):
+            if not isinstance(value, (int, float)) or not 0 < value <= 20000:
+                raise PsdiError(f"Implausible page dimension: {value!r}")
 
 
 def write_image(pages: list[tuple[float, float, bytes]],
@@ -245,13 +374,18 @@ def write_image(pages: list[tuple[float, float, bytes]],
 
 
 def read_image(data: bytes) -> ImageArchive:
-    """Parse a version 2 archive."""
+    """Parse a version 2 archive, rejecting anything inconsistent."""
     pos = 6
+    _need(data, pos, 2, "page count")
     nb_pages = struct.unpack_from("<H", data, pos)[0]
     pos += 2
 
+    if not 0 < nb_pages <= MAX_PAGES:
+        raise PsdiError(f"Implausible page count: {nb_pages}")
+
     pages: list[tuple[float, float, bytes]] = []
-    for _ in range(nb_pages):
+    for index in range(nb_pages):
+        _need(data, pos, 13, f"page {index + 1} header")
         width = struct.unpack_from("<f", data, pos)[0]
         pos += 4
         height = struct.unpack_from("<f", data, pos)[0]
@@ -260,6 +394,19 @@ def read_image(data: bytes) -> ImageArchive:
         pos += 1
         size = struct.unpack_from("<I", data, pos)[0]
         pos += 4
+
+        for value in (width, height):
+            if not 0 < value <= 20000:
+                raise PsdiError(
+                    f"Page {index + 1} has an implausible dimension: {value}"
+                )
+        if size > MAX_PAYLOAD_SIZE:
+            raise PsdiError(
+                f"Page {index + 1} claims {size} bytes, above the "
+                f"{MAX_PAYLOAD_SIZE} byte ceiling"
+            )
+        _need(data, pos, size, f"page {index + 1} payload")
+
         pages.append((width, height, unpack_payload(flags, data[pos : pos + size])))
         pos += size
 

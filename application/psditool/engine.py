@@ -212,20 +212,58 @@ def _classify_font(font_name: str) -> tuple[str, str]:
     return key, family
 
 
-def _rects_from_path_items(items) -> list[fitz.Rect]:
+def _is_axis_aligned_rectangle(points, tolerance: float = 0.6) -> bool:
+    """Report whether a polyline traces an axis-aligned rectangle.
+
+    Accepting any four-or-more-point polyline as a rectangle is wrong and
+    visibly so: the data series of a line chart becomes a coloured frame
+    around its own extent, and every straight segment inside a glyph outline
+    becomes a small black box. A rectangle has to be checked, not assumed --
+    four corners, every side horizontal or vertical, and consecutive sides
+    perpendicular.
+    """
+    if len(points) < 4:
+        return False
+
+    # Drop the closing point when the path returns to its origin.
+    pts = list(points)
+    if (abs(pts[0][0] - pts[-1][0]) <= tolerance
+            and abs(pts[0][1] - pts[-1][1]) <= tolerance):
+        pts = pts[:-1]
+    if len(pts) != 4:
+        return False
+
+    horizontal = []
+    for index in range(4):
+        x0, y0 = pts[index]
+        x1, y1 = pts[(index + 1) % 4]
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        if dy <= tolerance and dx > tolerance:
+            horizontal.append(True)
+        elif dx <= tolerance and dy > tolerance:
+            horizontal.append(False)
+        else:
+            return False  # diagonal, or a zero-length side
+
+    # Sides must alternate direction, otherwise it is a zigzag, not a box.
+    return horizontal[0] != horizontal[1] and horizontal[1] != horizontal[2] \
+        and horizontal[2] != horizontal[3]
+
+
+def _rects_from_path_items(items) -> list:
     """Recover axis-aligned rectangles from a vector path.
 
     Two shapes turn up in practice. Microsoft's PDF chain emits native "re"
     rectangles. LibreOffice draws the same table cell as four separate line
-    segments, and MuPDF reports it that way. Taking the path's overall
-    bounding box instead of walking its sub-items is what used to paint a
-    full-page black rectangle over documents built from multi-segment frames.
+    segments, and MuPDF reports it that way, so runs of connected segments
+    are examined too -- but only accepted when they genuinely close into a
+    rectangle.
     """
-    rects: list[fitz.Rect] = []
-    points: list[tuple[float, float]] = []
+    rects = []
+    points = []
 
-    def flush() -> None:
-        if len(points) >= 4:
+    def flush():
+        if _is_axis_aligned_rectangle(points):
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             rects.append(fitz.Rect(min(xs), min(ys), max(xs), max(ys)))
@@ -236,9 +274,28 @@ def _rects_from_path_items(items) -> list[fitz.Rect]:
         if kind == "re":
             flush()
             rects.append(fitz.Rect(item[1]))
+        elif kind == "qu":
+            # MuPDF folds four connected segments into a quad. When its
+            # corners are axis-aligned it is the same table border LibreOffice
+            # drew as separate lines, and must be kept.
+            flush()
+            quad = item[1]
+            corners = [(p.x, p.y) for p in (quad.ul, quad.ur, quad.lr, quad.ll)]
+            if _is_axis_aligned_rectangle(corners):
+                xs = [c[0] for c in corners]
+                ys = [c[1] for c in corners]
+                rects.append(fitz.Rect(min(xs), min(ys), max(xs), max(ys)))
         elif kind == "l":
-            points.append((item[1].x, item[1].y))
-            points.append((item[2].x, item[2].y))
+            start = (item[1].x, item[1].y)
+            end = (item[2].x, item[2].y)
+            # A gap means a new sub-path; the previous run cannot continue
+            # into it, so evaluate what has accumulated so far.
+            if points and (abs(points[-1][0] - start[0]) > 0.6
+                           or abs(points[-1][1] - start[1]) > 0.6):
+                flush()
+            if not points:
+                points.append(start)
+            points.append(end)
         else:
             # Curves and anything else cannot be reduced to a rectangle.
             flush()
@@ -300,11 +357,17 @@ def _is_effectively_monochrome(img: Image.Image, threshold: float = 0.002) -> bo
     that JPEG scanning introduces into nominally grey pixels.
     """
     sample = img.resize((64, 64))
-    pixels = sample.getdata()
-    coloured = sum(
-        1 for r, g, b in pixels if max(r, g, b) - min(r, g, b) > 18
-    )
-    return coloured / len(sample.getdata()) <= threshold
+    # getdata() is deprecated in Pillow 11 and removed in 14; tobytes gives
+    # the same pixels without the deprecation and without a Python-level
+    # sequence wrapper.
+    raw = sample.tobytes()
+    total = len(raw) // 3
+    coloured = 0
+    for offset in range(0, total * 3, 3):
+        channels = raw[offset:offset + 3]
+        if max(channels) - min(channels) > 18:
+            coloured += 1
+    return (coloured / total) <= threshold if total else True
 
 
 def _encode_jpeg(img: Image.Image, quality: int, allow_grayscale: bool = True) -> bytes:
@@ -363,37 +426,264 @@ def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict):
     return _encode_jpeg(img, params["jpeg_quality"]), width, height
 
 
+# Artwork regions are stored as ordinary images, so a decoder written against
+# the original specification renders them without knowing anything new. Their
+# identifiers are allocated from the top of the uint16 range the container
+# uses for xrefs, where they cannot collide with a real one.
+_ARTWORK_ID_TOP = 65500
+_ARTWORK_MIN_SIDE = 24.0
+_ARTWORK_MAX_PAGE_FRACTION = 0.55
+
+
+def _path_is_artwork(items) -> bool:
+    """Report whether a vector path is picture rather than structure.
+
+    Rectangles are structure: table cells, rules, fills. Anything else --
+    curves, diagonals, glyph outlines drawn as paths -- is artwork, and the
+    structured encoding has no way to describe it. A doughnut chart is the
+    clearest case: it is made entirely of arcs, so recording rectangles for it
+    records nothing at all.
+    """
+    if not items:
+        return False
+    if any(item[0] == "c" for item in items):
+        return True
+    for item in items:
+        if item[0] != "qu":
+            continue
+        quad = item[1]
+        corners = [(p.x, p.y) for p in (quad.ul, quad.ur, quad.lr, quad.ll)]
+        if not _is_axis_aligned_rectangle(corners):
+            return True
+    # Straight segments that do not close into rectangles: a line-chart
+    # series, or the outline of a glyph the producer converted to paths.
+    rects = _rects_from_path_items(items)
+    segments = sum(1 for item in items if item[0] == "l")
+    return segments > 0 and len(rects) * 4 < segments
+
+
+def _merge_boxes(boxes: list, pad: float = 8.0) -> list:
+    """Merge boxes that touch or nearly touch, repeating until stable."""
+    merged: list = []
+    for box in boxes:
+        placed = False
+        for index, existing in enumerate(merged):
+            if (existing + (-pad, -pad, pad, pad)).intersects(box):
+                merged[index] = existing | box
+                placed = True
+                break
+        if not placed:
+            merged.append(fitz.Rect(box))
+
+    for _ in range(8):
+        collapsed: list = []
+        for box in merged:
+            placed = False
+            for index, existing in enumerate(collapsed):
+                if (existing + (-pad, -pad, pad, pad)).intersects(box):
+                    collapsed[index] = existing | box
+                    placed = True
+                    break
+            if not placed:
+                collapsed.append(fitz.Rect(box))
+        if len(collapsed) == len(merged):
+            break
+        merged = collapsed
+    return merged
+
+
+def _artwork_regions(page) -> list:
+    """Return the page areas that must be rasterised to survive at all.
+
+    Kept deliberately conservative: a region has to be big enough to be a
+    figure rather than a stray flourish, and if the total would cover most of
+    the page the document is really a picture and the whole page-image mode is
+    the better answer, so nothing is rasterised here.
+    """
+    boxes = []
+    for path in page.get_drawings():
+        if not _path_is_artwork(path.get("items", [])):
+            continue
+        rect = fitz.Rect(path["rect"]) & page.rect
+        if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+            continue
+        boxes.append(rect)
+
+    if not boxes:
+        return []
+
+    regions = [
+        region for region in _merge_boxes(boxes)
+        if region.width >= _ARTWORK_MIN_SIDE and region.height >= _ARTWORK_MIN_SIDE
+    ]
+
+    if not regions:
+        return []
+
+    # A chart's shadows and legend swatches are placed images that overlap the
+    # vector artwork. Left outside the region they are extracted separately,
+    # and any of them carrying a soft mask lands as a black rectangle over the
+    # figure. Absorbing them into the region renders them in place instead.
+    for info in page.get_image_info(xrefs=True):
+        box = fitz.Rect(info.get("bbox", (0, 0, 0, 0))) & page.rect
+        if box.is_empty or box.get_area() <= 0:
+            continue
+        for index, region in enumerate(regions):
+            overlap = box & region
+            if not overlap.is_empty and overlap.get_area() >= 0.25 * box.get_area():
+                regions[index] = region | box
+                break
+
+    regions = _merge_boxes(regions)
+
+    page_area = abs(page.rect.width * page.rect.height) or 1.0
+    if sum(r.get_area() for r in regions) / page_area > _ARTWORK_MAX_PAGE_FRACTION:
+        return []
+    return regions
+
+
+def _image_bytes_with_mask(doc, xref: int, raw: dict) -> bytes | None:
+    """Return the image's pixels with its soft mask applied.
+
+    extract_image returns the base image only. When the object carries a soft
+    mask -- which is how a PDF stores a transparent PNG -- the base image is
+    black wherever the mask makes it invisible, so a drop shadow becomes a
+    black frame and a doughnut chart becomes a black square. The mask has to
+    be fetched separately and combined before the pixels mean anything.
+    """
+    smask = raw.get("smask", 0)
+    if not smask:
+        return raw["image"]
+
+    try:
+        base = fitz.Pixmap(doc, xref)
+        if base.alpha:
+            # The pixmap may already carry an empty alpha channel, and MuPDF
+            # refuses to attach a mask to a colour pixmap that has one.
+            base = fitz.Pixmap(base, 0)
+        mask = fitz.Pixmap(doc, smask)
+        combined = fitz.Pixmap(base, mask)
+        return combined.tobytes("png")
+    except Exception:  # noqa: BLE001
+        log.debug("Could not apply soft mask %d to image %d", smask, xref,
+                  exc_info=True)
+        return raw["image"]
+
+
+# A gap wider than this fraction of the font size means the producer moved the
+# text cursor rather than typed a space: a table cell boundary, or a justified
+# column. 0.45 sits well clear of an ordinary inter-word space (~0.25) and well
+# below the gaps real tables use (~0.75 and up).
+_SPAN_SPLIT_RATIO = 0.45
+
+
+def _split_span_runs(span) -> list:
+    """Break a span wherever its glyphs jump horizontally.
+
+    A PDF may lay out a whole table row as one text object, positioning each
+    cell with an explicit cursor move and no glyph in between. The span then
+    reads "128847 119323" with a single space, while the glyphs actually sit
+    eighty points apart. Rebuilt from the span alone, the values collapse
+    against the left edge of the row and every column after the first is
+    wrong. Splitting on the real glyph positions restores the columns.
+    """
+    chars = span.get("chars") or []
+    if not chars:
+        return []
+
+    threshold = max(1.0, _SPAN_SPLIT_RATIO * span.get("size", 8))
+
+    runs = []
+    current = []
+    previous_end = None
+
+    for char in chars:
+        box = char["bbox"]
+        if previous_end is not None and (box[0] - previous_end) > threshold:
+            runs.append(current)
+            current = []
+        current.append(char)
+        previous_end = box[2]
+
+    runs.append(current)
+
+    out = []
+    for run in runs:
+        if not any(char["c"].strip() for char in run):
+            continue
+        # The padding spaces are kept deliberately. A reader that concatenates
+        # a line -- which is what the original implementation does -- then
+        # still gets "36620 91,7" instead of "3662091,7"; only the column
+        # positions are lost, which is no worse than before.
+        text = "".join(char["c"] for char in run)
+        visible = [char for char in run if char["c"].strip()]
+        x0 = min(char["bbox"][0] for char in visible)
+        x1 = max(char["bbox"][2] for char in visible)
+        y0 = min(char["bbox"][1] for char in visible)
+        y1 = max(char["bbox"][3] for char in visible)
+        out.append((text, (x0, y0, x1, y1)))
+    return out
+
+
+def _covered(box, regions) -> bool:
+    """Report whether a box lies inside an already-rasterised region."""
+    if not regions:
+        return False
+    rect = fitz.Rect(box)
+    if rect.is_empty:
+        return False
+    for region in regions:
+        overlap = rect & region
+        if not overlap.is_empty and overlap.get_area() >= 0.7 * rect.get_area():
+            return True
+    return False
+
+
 def _extract_page(page, page_idx: int, images_data: dict,
-                  precision: int = 1) -> dict:
-    """Build the manifest entry for one page."""
+                  precision: int = 1, artwork: list | None = None) -> dict:
+    """Build the manifest entry for one page.
+
+    Content falling inside a rasterised artwork region is skipped: it is
+    already in the picture, and drawing it a second time as text or as a
+    rectangle produces a sharp copy sitting on top of a blurred one.
+    """
+    artwork = artwork or []
     page_data: dict = {"pn": page_idx + 1, "tb": [], "ir": [], "dr": [], "ck": []}
 
     # --- text -------------------------------------------------------------
-    for block in page.get_text("dict").get("blocks", []):
+    # rawdict rather than dict: only per-character boxes reveal where a span's
+    # glyphs actually sit, which is what table columns depend on.
+    for block in page.get_text("rawdict").get("blocks", []):
         if block.get("type") != 0:
             continue
 
         out_block: dict = {"l": []}
         for line in block.get("lines", []):
+            if _covered(line["bbox"], artwork):
+                continue
             out_line: dict = {"b": _quantize_box(line["bbox"], precision), "s": []}
             for span in line.get("spans", []):
-                text = _normalize_text(span.get("text", ""))
-                if not text.strip():
-                    continue
                 font_key, family = _classify_font(span.get("font", ""))
-                out_span = {
-                    "t": text,
-                    "f": font_key,
-                    "fa": family,
-                    "sz": _quantize(span.get("size", 8), 1),
-                    "c": span.get("color", 0),
-                    "b": _quantize_box(span["bbox"], precision),
-                }
-                # Drop anything the reader reconstructs on its own.
-                for key, default in _SPAN_DEFAULTS.items():
-                    if out_span[key] == default:
-                        del out_span[key]
-                out_line["s"].append(out_span)
+                size = _quantize(span.get("size", 8), 1)
+                colour = span.get("color", 0)
+
+                for raw_text, box in _split_span_runs(span):
+                    text = _normalize_text(raw_text)
+                    if not text.strip():
+                        continue
+                    out_span = {
+                        "t": text,
+                        "f": font_key,
+                        "fa": family,
+                        "sz": size,
+                        "c": colour,
+                        "b": _quantize_box(box, precision),
+                    }
+                    # Drop anything the reader reconstructs on its own.
+                    for key, default in _SPAN_DEFAULTS.items():
+                        if out_span[key] == default:
+                            del out_span[key]
+                    out_line["s"].append(out_span)
 
             if not out_line["s"]:
                 continue
@@ -414,6 +704,8 @@ def _extract_page(page, page_idx: int, images_data: dict,
         if not xref or str(xref) not in images_data:
             continue
         bbox = info.get("bbox", (0, 0, 0, 0))
+        if _covered(bbox, artwork):
+            continue
         key = f"{xref}_{bbox[0]:.0f}_{bbox[1]:.0f}"
         if key in seen:
             continue
@@ -443,6 +735,9 @@ def _extract_page(page, page_idx: int, images_data: dict,
                 luminance = 0.299 * fill[0] + 0.587 * fill[1] + 0.114 * fill[2]
                 if luminance < 0.3:
                     continue
+
+            if _covered(rect, artwork):
+                continue
 
             entry = {"t": "rect", "r": _quantize_box(rect, precision)}
             if fill is not None:
@@ -480,6 +775,25 @@ def _extract_page(page, page_idx: int, images_data: dict,
     return page_data
 
 
+def _render_region(page, region, params: dict) -> bytes | None:
+    """Rasterise one page region at the preset resolution.
+
+    Rendering through get_pixmap composites the region the way a viewer does,
+    so transparency, soft masks and blend modes come out right -- which is
+    what the object-by-object extraction cannot do for a chart.
+    """
+    try:
+        dpi = params["dpi"]
+        pix = page.get_pixmap(clip=region, matrix=fitz.Matrix(dpi / 72, dpi / 72))
+        if pix.width < 2 or pix.height < 2:
+            return None
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        return _encode_jpeg(img, params["jpeg_quality"])
+    except Exception:  # noqa: BLE001
+        log.debug("Could not rasterise region %s", region, exc_info=True)
+        return None
+
+
 def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
                      skip_images: bool) -> bytes:
     doc = fitz.open(pdf_path)
@@ -502,8 +816,11 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
                         continue
                     if not raw:
                         continue
+                    pixels = _image_bytes_with_mask(doc, xref, raw)
+                    if not pixels:
+                        continue
                     optimized = _optimize_image(
-                        raw["image"], raw["width"], raw["height"], params
+                        pixels, raw["width"], raw["height"], params
                     )
                     if not optimized:
                         continue
@@ -524,11 +841,41 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
             "images": image_meta,
         }
 
+        # Artwork identifiers are handed out downwards from the top of the
+        # range so they can never meet a real xref coming up from below.
+        next_artwork_id = _ARTWORK_ID_TOP
+
         for page_idx, page in enumerate(doc):
-            manifest["pages"].append(
-                _extract_page(page, page_idx, images_data,
-                              params.get("coord_precision", 1))
-            )
+            regions = [] if skip_images else _artwork_regions(page)
+
+            rendered = []
+            for region in regions:
+                tile = _render_region(page, region, params)
+                if tile is None:
+                    continue
+                key = str(next_artwork_id)
+                next_artwork_id -= 1
+                images_data[key] = tile
+                image_meta[key] = {
+                    "w": int(region.width),
+                    "h": int(region.height),
+                    "s": len(tile),
+                }
+                rendered.append((key, region))
+
+            page_data = _extract_page(page, page_idx, images_data,
+                                      params.get("coord_precision", 1),
+                                      [r for _, r in rendered])
+
+            # Placed after extraction so the artwork sits above the fills and
+            # below the text, exactly where the original drew it.
+            for key, region in rendered:
+                page_data["ir"].append({
+                    "x": key,
+                    "b": _quantize_box(region, params.get("coord_precision", 1)),
+                })
+
+            manifest["pages"].append(page_data)
             manifest["page_sizes"].append(
                 {"w": page.rect.width, "h": page.rect.height}
             )
@@ -682,18 +1029,54 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes
 
 
 def _draw_line(page, line: dict) -> None:
-    """Render one line of text through the HTML engine.
+    """Render one line of text, preserving the columns it was laid out in.
+
+    Spans are grouped by position rather than simply concatenated. A line may
+    hold a whole table row, with each cell placed by an explicit cursor move;
+    concatenating those into one box collapses every column against the left
+    edge. Spans that genuinely run on -- a bold word inside a sentence -- have
+    no gap between them and stay in the same box, so inline styling still
+    works.
+    """
+    spans = [span for span in line.get("s", []) if span.get("t")]
+    if not spans:
+        return
+
+    line_box = line["b"]
+
+    clusters: list[list[dict]] = []
+    previous_end = None
+    for span in spans:
+        box = span.get("b", line_box)
+        size = span.get("sz", 8)
+        gap = None if previous_end is None else box[0] - previous_end
+        if gap is None or gap <= max(1.0, _SPAN_SPLIT_RATIO * size):
+            if clusters:
+                clusters[-1].append(span)
+            else:
+                clusters.append([span])
+        else:
+            clusters.append([span])
+        previous_end = box[2]
+
+    for cluster in clusters:
+        boxes = [span.get("b", line_box) for span in cluster]
+        cluster_box = [
+            min(b[0] for b in boxes), line_box[1],
+            max(b[2] for b in boxes), line_box[3],
+        ]
+        _draw_cluster(page, cluster, cluster_box)
+
+
+def _draw_cluster(page, spans: list, bbox) -> None:
+    """Render one run of adjacent spans inside a single box.
 
     insert_htmlbox is used rather than insert_text because it handles mixed
-    styling within a line and wraps sensibly. It also applies an internal
+    styling within a run and wraps sensibly. It also applies an internal
     margin, which on spreadsheets exported at ~4 pt leaves no room at all --
     hence the half-point of horizontal slack and the permission to shrink the
     font rather than truncate the string.
     """
-    spans = line.get("s", [])
-    if not spans:
-        return
-
     parts: list[str] = []
     for span in spans:
         text = span.get("t", "")
@@ -711,7 +1094,7 @@ def _draw_line(page, line: dict) -> None:
         style = (
             f"font-family:{_FAMILY_CSS.get(span.get('fa', 's'), _FAMILY_CSS['s'])};"
             f"font-size:{span.get('sz', 8)}pt;color:{color_hex};"
-            "line-height:1;margin:0;padding:0;"
+            "line-height:1;margin:0;padding:0;white-space:pre;"
         )
         key = span.get("f", "R")
         if key == "B":
@@ -726,7 +1109,6 @@ def _draw_line(page, line: dict) -> None:
     if not parts:
         return
 
-    bbox = line["b"]
     line_height = bbox[3] - bbox[1]
     max_font = max((s.get("sz", 8) for s in spans), default=8)
     # Proportional, not a fixed floor: a fixed 12 pt minimum overlaps
@@ -735,7 +1117,8 @@ def _draw_line(page, line: dict) -> None:
     rect = fitz.Rect(bbox[0] - 0.5, bbox[1], bbox[2] + 0.5, bbox[1] + height)
 
     try:
-        page.insert_htmlbox(rect, "".join(parts), css=_HTML_BASE_CSS, scale_low=0.5)
+        page.insert_htmlbox(rect, "".join(parts), css=_HTML_BASE_CSS,
+                            scale_low=0.5)
     except Exception:  # noqa: BLE001
         # Fall back to plain text placement rather than dropping the line.
         for span in spans:
@@ -809,7 +1192,12 @@ def _rebuild_image(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes,
 
 def archive_to_pdf(archive_data: bytes, output_path: str | None = None,
                    progress_cb: ProgressFn = None) -> tuple[bytes, dict]:
-    """Rebuild a PDF from a received .psdi archive."""
+    """Rebuild a PDF from a received .psdi archive.
+
+    Every failure mode raises PsdiError, including a malformed container or a
+    manifest that does not describe a coherent document, so the caller never
+    has to interpret a struct or LZMA error from the parsing layer.
+    """
     version = psdi.peek_version(archive_data)
 
     if version == psdi.ARCHIVE_VERSION_STRUCT:

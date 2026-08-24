@@ -25,6 +25,7 @@ psditool/cli.py             CLI headless, aussi le point d'entrée du menu conte
 psditool/shell_windows.py   intégration Explorateur (registre)
 psditool/resources.py       résolution des ressources embarquées
 psditool/gui/               interface PyQt6, style Fusion
+tests/                      57 tests : conteneur, moteur, interopérabilité
 pdfteleporter.py            point d'entrée unique : IHM / menu contextuel / CLI
 pdfteleporter.spec          PyInstaller, deux exécutables depuis une analyse
 build/version_info*.txt     ressources de version Windows

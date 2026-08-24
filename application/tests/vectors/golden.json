@@ -1,0 +1,45 @@
+{
+ "comment": "Golden archive digests. A change here means the bytes on the air changed, which breaks interoperability with other .psdi implementations. Regenerate only deliberately.",
+ "vectors": {
+  "mono|mode=image|quality=low": {
+   "sha256": "4fa9d79b00f9d3f14379f2dc65a97f97299d4cbb6e01cf88105358084a840f0b",
+   "size": 32186
+  },
+  "report_3p|mode=image|quality=low": {
+   "sha256": "bd8d0733d1fdb3a3a35bd565fabb1bd404b24b27853ce625c3713226896cd43e",
+   "size": 82605
+  },
+  "report_3p|quality=high": {
+   "sha256": "222be565f89b6286a58d1b9c39dab83773f8fda7394cdcc3e699ce7aca4f9359",
+   "size": 2225
+  },
+  "report_3p|quality=low": {
+   "sha256": "4cdfd6b552f39b89097a2c417a932736439ebb54fe673e79d4643f692f59172e",
+   "size": 2093
+  },
+  "report_3p|quality=medium": {
+   "sha256": "222be565f89b6286a58d1b9c39dab83773f8fda7394cdcc3e699ce7aca4f9359",
+   "size": 2225
+  },
+  "report_3p|quality=medium|skip_images=True": {
+   "sha256": "222be565f89b6286a58d1b9c39dab83773f8fda7394cdcc3e699ce7aca4f9359",
+   "size": 2225
+  },
+  "report_3p|quality=ultra_low": {
+   "sha256": "4cdfd6b552f39b89097a2c417a932736439ebb54fe673e79d4643f692f59172e",
+   "size": 2093
+  },
+  "rotated|quality=low": {
+   "sha256": "f70ab669d0db0da0d9474f9030883deef6886320e669a8cad765d88b8ea96822",
+   "size": 59665
+  },
+  "table_12r|quality=low": {
+   "sha256": "e5604beea41777c1c26b12735eb82e56de077ba91f16c21ca241c7626754d456",
+   "size": 628
+  },
+  "table_12r|quality=medium": {
+   "sha256": "d72d57e75334faa4f8edc3c5edc31219f79281459ff649132aee5e74a629ea08",
+   "size": 622
+  }
+ }
+}

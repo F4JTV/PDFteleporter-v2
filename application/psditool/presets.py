@@ -120,7 +120,13 @@ RADIO_LABELS = {
     MODE_LORA: "LoRa (~1200 bps)",
 }
 
-# Winlink Express refuses attachments above this size.
+# Attachment ceiling used for the warning shown after compression.
+#
+# This value comes from the original implementation and is the constraint that
+# actually decides whether a message goes through, since this tool hands its
+# output to Winlink rather than transmitting itself. Winlink's real limit
+# depends on the gateway and the session type, so confirm it against the
+# stations you work before relying on the warning as a guarantee.
 WINLINK_MAX_ATTACHMENT = 120 * 1024
 
 

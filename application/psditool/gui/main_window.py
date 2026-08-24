@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget,
 )
 
-from .. import engine, format as psdi
+from .. import __version__, engine, format as psdi
 from ..resources import icon_path
 from ..presets import (
     MODE_PACKET_1200, MODE_VARA_FM_NARROW, MODE_VARA_HF, QUALITY_LABELS,
@@ -567,7 +567,7 @@ class MainWindow(QMainWindow):
     def show_about(self) -> None:
         QMessageBox.about(
             self, "À propos de PDF Teleporter",
-            "<b>PDF Teleporter</b><br><br>"
+            f"<b>PDF Teleporter</b> {__version__}<br><br>"
             "Compresse des documents PDF en archives .psdi pour les "
             "transmettre sur des liaisons radio à bande étroite, et les "
             "recompose à la réception.<br><br>"

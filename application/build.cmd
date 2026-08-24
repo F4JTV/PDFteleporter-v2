@@ -32,6 +32,16 @@ python -c "import pymupdf, PIL, PyQt6.QtWidgets" >nul 2>&1 || (
     exit /b 1
 )
 
+rem Run the test suite before building. Shipping a binary that fails its own
+rem interoperability vectors is worse than not shipping one.
+echo     Running tests...
+python -m unittest discover -s tests -t . -b >nul 2>&1 || (
+    echo ERROR: tests failed. Run for details:
+    echo        python -m unittest discover -s tests -t . -v
+    exit /b 1
+)
+echo     Tests: OK
+
 echo [2/4] Clearing previous output...
 if exist dist rmdir /s /q dist
 if exist build\PDFteleporter rmdir /s /q build\PDFteleporter

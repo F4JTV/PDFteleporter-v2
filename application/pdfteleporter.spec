@@ -123,7 +123,11 @@ EXCLUDES = [
     'matplotlib', 'sympy', 'networkx', 'numpy', 'av', 'grpc', 'opentelemetry',
     # Development and packaging tooling.
     'IPython', 'jupyter', 'notebook', 'pytest', 'setuptools', 'pip', 'Cython',
-    'test', 'unittest', 'pydoc_data', 'lib2to3',
+    'test', 'pydoc_data', 'lib2to3',
+    # The project's own test package: useful in the repository, dead weight in
+    # a shipped build. 'unittest' itself is not excluded, since parts of the
+    # standard library import it.
+    'tests',
     # Qt modules the interface does not touch. QtWebEngine alone is ~150 MB.
     'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets', 'PyQt6.QtWebChannel',
     'PyQt6.QtQml', 'PyQt6.QtQuick', 'PyQt6.QtQuick3D', 'PyQt6.QtMultimedia',

@@ -32,6 +32,23 @@ version émet, et réciproquement. Toutes les optimisations décrites plus bas o
 été retenues précisément parce qu'elles restent lisibles par un décodeur écrit
 sur la spécification d'origine.
 
+## Périmètre
+
+Cet outil compresse et recompose, rien de plus. Il ne parle pas à la radio.
+
+L'émission est le travail de Winlink, avec VARA ou Direwolf selon la liaison :
+l'archive `.psdi` part en pièce jointe d'un message Winlink Express, et la
+station réceptrice la recompose avec ce même outil. Le moteur original de F1GBD
+comportait une couche de fragmentation TNC et de tramage VARA (`prepare_for_tnc`,
+`prepare_for_vara` et leurs réciproques) parce qu'il alimentait son application
+TCQ ; elle n'a pas été reprise, et ne le sera pas.
+
+Cette décision a une conséquence pratique : **la contrainte qui compte est la
+limite de pièce jointe Winlink**, pas le débit du modem. Les estimations de
+temps par mode radio restent affichées parce qu'elles renseignent sur la durée
+de la session, mais c'est l'avertissement de dépassement de taille qui décide
+si le message passera.
+
 ---
 
 ## Installation
@@ -109,6 +126,30 @@ Le choix n'est pas laissé à l'opérateur. Un arrêté préfectoral scanné res
 produit une page pivotée de 90° sur fond noir. La détection repère la rotation
 et les pages majoritairement image sans texte, et bascule d'elle-même en
 journalisant pourquoi.
+
+### Illustrations vectorielles
+
+Un graphique en secteurs est fait d'arcs, une courbe de segments obliques : le
+mode structuré n'a aucun moyen de les décrire, puisqu'il ne stocke que du texte
+et des rectangles. Les zones de dessin qui ne se réduisent pas à des rectangles
+sont donc détectées, rendues à la résolution du préréglage, et rangées comme
+des images ordinaires — un décodeur écrit sur la spécification d'origine les
+affiche sans rien connaître de ce mécanisme.
+
+Le texte et les rectangles couverts par une de ces zones sont retirés du
+manifeste : ils sont déjà dans l'image, et les dessiner une seconde fois
+poserait une copie nette sur une copie floue. Les images qui chevauchent une
+zone (ombres portées, pastilles de légende) y sont absorbées, faute de quoi
+elles seraient extraites séparément.
+
+Le rendu passe par `get_pixmap`, qui compose la zone comme le ferait un
+lecteur : transparence, masques et modes de fusion sortent justes, ce que
+l'extraction objet par objet ne sait pas faire.
+
+Contrepartie assumée : les étiquettes d'un graphique deviennent de l'image et
+ne sont donc plus sélectionnables. Sur un bulletin de huit pages, cela
+représente environ un pour cent des mots — auparavant ces mêmes étiquettes
+étaient soit absentes, soit des taches noires.
 
 ### Correctifs de rendu hérités de l'original
 
@@ -201,6 +242,44 @@ ignorer une rotation ne l'est jamais, puisque le mode structuré travaille en
 coordonnées non pivotées. La détection tourne désormais toujours, seule la
 raison « scan » étant écartée en mode texte seul.
 
+**Rectangles inventés.** Toute polyligne d'au moins quatre points était prise
+pour un rectangle. La série de données d'un graphique en courbes devenait donc
+un cadre coloré autour de sa propre étendue — un rectangle jaune posé sur un
+graphique COVID — et chaque segment droit d'un glyphe vectorisé devenait une
+petite tache noire : sur une page d'exemple, 97 rectangles produits pour 35
+tracés réels. Un rectangle est désormais vérifié et non supposé : quatre coins,
+tous les côtés horizontaux ou verticaux, côtés consécutifs perpendiculaires.
+Le cas LibreOffice reste couvert, y compris quand MuPDF replie les quatre
+segments en un quadrilatère.
+
+**Colonnes de tableau effondrées.** Un PDF peut composer toute une ligne de
+tableau en un seul objet texte, chaque cellule étant placée par un déplacement
+explicite du curseur sans glyphe intermédiaire. Le fragment se lit alors
+« 128847 119323 » avec une simple espace, alors que les glyphes sont
+réellement distants de quatre-vingts points. Reconstruit à partir du fragment
+seul, tout se tassait contre le bord gauche de la ligne et chaque colonne après
+la première était fausse.
+
+L'extraction passe donc par `rawdict` : seules les boîtes par caractère
+révèlent où les glyphes se trouvent vraiment. Un fragment est coupé là où ses
+glyphes sautent de plus de 0,45 fois la taille de police — nettement au-dessus
+d'une espace ordinaire (~0,25) et bien en dessous des écarts qu'emploient les
+tableaux réels (~0,75 et plus). À la recomposition, les fragments sont
+regroupés par position et non simplement concaténés : ceux qui s'enchaînent
+vraiment, comme un mot en gras au milieu d'une phrase, restent dans la même
+boîte, si bien que le style en ligne continue de fonctionner.
+
+Les espaces de remplissage sont conservées volontairement : un lecteur qui
+concatène la ligne — ce que fait l'implémentation d'origine — lit toujours
+« 36620 91,7 » et non « 3662091,7 ». Il perd les positions de colonnes, ce qui
+n'est pas pire qu'avant.
+
+**Masques de transparence.** `extract_image` ne renvoie que l'image de base.
+Quand l'objet porte un masque doux — la façon dont un PDF stocke un PNG
+transparent — cette base est noire partout où le masque la rend invisible : une
+ombre portée devenait un cadre noir, un graphique en anneau un carré noir. Le
+masque est maintenant récupéré et composé avant toute utilisation des pixels.
+
 **Empaquetage.** Le binaire d'origine embarquait 846 Mo décompressés, dont
 330 Mo de PyTorch, plus transformers, pyarrow, scipy, sklearn et onnxruntime —
 aucun atteignable depuis le code, tous ramassés par PyInstaller dans
@@ -211,6 +290,89 @@ paquets à exclure, et le script de compilation alerte si la sortie dépasse
 **Cohérence de version.** Le module d'origine annonçait `1.0.5` dans son
 en-tête alors que la constante indiquait `1.0.6` ; l'historique n'avait pas été
 mis à jour.
+
+---
+
+## Robustesse en réception
+
+Une archive qui arrive par radio est une entrée non fiable : toutes les
+longueurs qu'elle contient sont contrôlées par l'émetteur, et LZMA se dilate
+très fortement. Le décodeur applique donc des plafonds — taille d'archive,
+manifeste décompressé, charge utile, nombre de pages et d'images — largement
+au-dessus de ce que produit un document réel, si bien qu'ils n'interfèrent
+jamais avec du trafic légitime.
+
+La décompression est incrémentale et s'arrête au plafond : un fichier de 30 ko
+qui se dilaterait en 200 Mo est rejeté après le premier bloc, sans jamais
+allouer l'expansion complète.
+
+Le manifeste est recoupé avant tout dessin. Un manifeste déclarant plus de
+pages que de dimensions de page est cohérent en interne — son CRC est correct —
+et provoquait auparavant une `IndexError` au milieu de la recomposition. Il est
+désormais rejeté à la lecture.
+
+Toutes les défaillances remontent une seule exception, `PsdiError`, portant un
+message explicite. L'opérateur lit « Archive tronquée : le manifeste demande
+609 octets » au lieu d'une `LZMAError` ou d'une `struct.error`.
+
+**Ces contrôles ne concernent que la lecture.** L'encodeur est inchangé : les
+24 vecteurs de référence capturés avant l'ajout sont identiques au bit près
+après. L'interopérabilité et le poids des archives ne bougent pas.
+
+---
+
+## Tests
+
+```
+python -m unittest discover -s tests -t .
+```
+
+57 tests, sans dépendance en plus de celles de l'application.
+
+| Fichier | Objet |
+|---|---|
+| `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles |
+| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité |
+| `tests/test_interop.py` | vecteurs de référence et décodage historique |
+
+Les documents de test sont construits par `tests/fixtures.py` plutôt que livrés
+en fichiers PDF. Un PDF porte un horodatage de création et une disposition
+d'objets qui varie d'une version de PyMuPDF à l'autre : un fichier livré
+dériverait, ou masquerait une dérive. Ce qui doit rester stable est
+l'**archive**, et elle ne dépend que du texte, de la géométrie et des images —
+jamais des métadonnées du PDF.
+
+### Vecteurs de référence
+
+`tests/vectors/golden.json` fige les empreintes des archives produites depuis
+des entrées fixes. Toute modification future qui change les octets émis fait
+échouer le test, avec le détail des tailles avant et après. C'est la seule
+protection réelle contre une rupture d'interopérabilité silencieuse.
+
+Ce filet a été éprouvé en désactivant volontairement une optimisation : le test
+a bien signalé les quatre vecteurs affectés.
+
+Les vecteurs se régénèrent par
+
+```
+python -m tests.test_interop --update
+```
+
+à ne faire que délibérément, en documentant pourquoi la sortie a changé.
+
+### Décodage historique
+
+`TestLegacyDecoder` réimplémente le chemin de lecture tel que l'original le
+faisait — `struct` et `json` nus, avec `.get(clé, défaut)` pour chaque champ
+optionnel — et vérifie qu'il récupère bien le document. C'est ce qui prouve que
+les optimisations de compression restent compatibles : les clés égales à leur
+défaut sont omises du manifeste, ce qui n'est sûr que si le lecteur fournit ces
+défauts. Le test échoue aussi si une optimisation cesse d'être exercée, pour
+éviter qu'il passe sans rien vérifier.
+
+Il contrôle également que le flux LZMA2 réglé (`pb=0`, recherche extrême) se
+décode toujours avec la spécification de filtre nue, et que les charges utiles
+JPEG stockées brutes commencent bien par la signature JPEG.
 
 ---
 
