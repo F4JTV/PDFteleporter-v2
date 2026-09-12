@@ -48,6 +48,37 @@ class CompressWorker(_BaseWorker):
             self.failed.emit(f"Compression failed: {exc}")
 
 
+class EstimateWorker(_BaseWorker):
+    """Compress into memory to measure what the archive will really weigh.
+
+    The previous estimate multiplied the source size by a per-preset guess,
+    which on a document heavy with photographs was wrong by a factor of two --
+    precisely when knowing whether it fits a Winlink attachment matters most.
+    Compressing for real costs a second and gives the true figure.
+
+    Nothing is written to disk: only the size and the transfer times are kept.
+    """
+
+    def __init__(self, pdf_path: str, quality: str, skip_images: bool):
+        super().__init__()
+        self._pdf_path = pdf_path
+        self._quality = quality
+        self._skip_images = skip_images
+
+    def run(self) -> None:
+        try:
+            _, info = engine.pdf_to_archive(
+                self._pdf_path,
+                quality=self._quality,
+                skip_images=self._skip_images,
+            )
+            self.finished_ok.emit(self._pdf_path, info)
+        except Exception as exc:  # noqa: BLE001
+            # An estimate that fails is not worth interrupting anyone over;
+            # the real compression will report the problem properly.
+            self.failed.emit(f"Estimation impossible : {exc}")
+
+
 class RebuildWorker(_BaseWorker):
     def __init__(self, archive_path: str, output_path: str):
         super().__init__()

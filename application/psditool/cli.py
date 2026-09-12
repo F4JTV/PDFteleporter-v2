@@ -204,13 +204,25 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
     # The context menu passes a single file with a --compress / --rebuild
-    # flag, which is shorter to encode in a registry command string than the
-    # full subcommand form.
+    # flag, optionally followed by --quality, which is shorter to encode in a
+    # registry command string than the full subcommand form.
     if argv and argv[0] in ("--compress", "--rebuild") and len(argv) >= 2:
         action, target = argv[0], argv[1]
+        quality = QUALITY_MEDIUM
+        if "--quality" in argv[2:]:
+            position = argv.index("--quality")
+            if position + 1 < len(argv):
+                candidate = argv[position + 1]
+                if candidate in QUALITY_ORDER:
+                    quality = candidate
+                else:
+                    _notify("Qualité inconnue",
+                            f"« {candidate} » n'est pas un préréglage connu.",
+                            error=True)
+                    return 2
         logging.basicConfig(level=logging.WARNING)
         if action == "--compress":
-            return cmd_compress(target, QUALITY_MEDIUM, None, False, False)
+            return cmd_compress(target, quality, None, False, False)
         return cmd_rebuild(target, None, False)
 
     args = build_parser().parse_args(argv)

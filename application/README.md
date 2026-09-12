@@ -72,12 +72,30 @@ temps à le recomposer.
 
 L'interface est en français et suit le réglage clair/sombre de Windows.
 
+L'interface accepte le **glisser-déposer** d'un `.pdf` ou d'un `.psdi` : le
+fichier part dans le bon panneau selon son extension, sans qu'il faille viser la
+bonne moitié de la fenêtre. Un dépôt multiple est refusé plutôt que deviné.
+
+Les **estimations sont mesurées, pas devinées**. L'archive est réellement
+compressée en mémoire, en arrière-plan, ce qui donne la taille exacte et non un
+produit de la taille source par un coefficient — lequel se trompait de 16 % sur
+un bulletin chargé de photographies, précisément quand savoir si le message
+passe sous la limite Winlink compte le plus. La mesure est différée de 450 ms :
+changer trois fois de qualité de suite ne lance qu'une compression, celle du
+réglage retenu.
+
 ### Menu contextuel de l'Explorateur
 
 *Outils → Ajouter au menu contextuel de l'Explorateur* enregistre deux verbes :
 
-- clic droit sur un `.pdf` → **Téléporter : compresser en .psdi**
+- clic droit sur un `.pdf` → **Téléporter : compresser en .psdi**, qui ouvre un
+  sous-menu en cascade proposant les quatre qualités, du transfert le plus
+  rapide au plus lent
 - clic droit sur un `.psdi` → **Téléporter : recomposer le PDF**
+
+Le choix de la qualité est la seule décision que l'opérateur ait réellement à
+prendre ; l'obliger à ouvrir l'interface pour la prendre viderait le clic droit
+de son intérêt.
 
 Sous Windows 11, ces entrées apparaissent sous *Afficher plus d'options* (ou
 Maj+F10). Atteindre le menu de premier niveau exige une extension shell MSIX
@@ -410,13 +428,30 @@ champ rompt l'interopérabilité avec les stations en service.
 ## Compilation pour Windows
 
 ```
-pip install -r requirements.txt pyinstaller
 build.cmd full
 ```
 
-`build.cmd` seul construit uniquement l'application ; `full` compile aussi
-l'installateur. La sortie arrive dans `dist\PDFteleporter\` et
-`dist\installer\`.
+Rien à installer au préalable : le script provisionne son propre environnement
+virtuel sous `.venv-build`, y installe les dépendances et PyInstaller, puis
+exécute chaque étape dedans.
+
+| | |
+|---|---|
+| `build.cmd` | l'application seule |
+| `build.cmd full` | l'application, puis l'installateur |
+| `build.cmd fresh` | reconstruit l'environnement de zéro |
+
+L'environnement dédié n'est pas une question de propreté. PyInstaller embarque
+tout ce qu'il trouve d'importable dans l'environnement depuis lequel il
+s'exécute : compiler depuis un interpréteur généraliste est exactement la façon
+dont une version se retrouve à transporter des paquets que l'application
+n'importe jamais — l'original livrait 846 Mo ainsi. Cela supprime aussi le
+piège des deux interpréteurs, où les dépendances sont installées dans un Python
+et PyInstaller lancé sous un autre, produisant un exécutable qui n'échoue que
+sur une machine vierge.
+
+La sortie arrive dans `dist\PDFteleporter\` et `dist\installer\`, avec une
+empreinte SHA-256 à côté de l'installateur.
 
 Deux exécutables sortent d'une seule analyse PyInstaller :
 

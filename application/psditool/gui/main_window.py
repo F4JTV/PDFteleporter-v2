@@ -8,18 +8,21 @@ the bottom that can be read back during an exercise debrief.
 from __future__ import annotations
 
 import html
+import logging
 import os
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer
 from PyQt6.QtGui import (
-    QAction, QDesktopServices, QFontDatabase, QIcon, QPalette,
+    QAction, QDesktopServices, QDragEnterEvent, QDropEvent, QFontDatabase,
+    QIcon, QPalette,
 )
 from PyQt6.QtCore import QUrl
 from PyQt6.QtWidgets import (
-    QComboBox, QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QVBoxLayout,
+    QWidget,
 )
 
 from .. import __version__, engine, format as psdi
@@ -29,12 +32,15 @@ from ..presets import (
     QUALITY_ORDER, QUALITY_PRESETS, WINLINK_MAX_ATTACHMENT, format_bytes,
     format_duration, format_percent,
 )
-from .workers import CompressWorker, RebuildWorker
+from .workers import CompressWorker, EstimateWorker, RebuildWorker
 from .theme import dim_color, log_colors
 
 
 # The engine reports why it switched modes as a stable identifier, not as
 # prose, so the log can be translated without the engine knowing about it.
+log = logging.getLogger(__name__)
+
+
 def _decimal_seconds(value: float) -> str:
     return f"{value:.1f}".replace(".", ",")
 
@@ -63,7 +69,7 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("PDF Teleporter")
-        self.resize(1100, 720)
+        self._size_to_screen(1100, 720)
 
         # Also set per-window: a window created before the application icon is
         # installed, or shown on a platform that does not inherit it, would
@@ -72,7 +78,18 @@ class MainWindow(QMainWindow):
         if icon:
             self.setWindowIcon(QIcon(icon))
 
+        self.setAcceptDrops(True)
+
         self._worker: QThread | None = None
+        self._estimator: QThread | None = None
+
+        # Changing quality three times in a row must not launch three
+        # compressions. The timer restarts on every change, so only the
+        # setting the operator settles on is ever measured.
+        self._estimate_timer = QTimer(self)
+        self._estimate_timer.setSingleShot(True)
+        self._estimate_timer.setInterval(450)
+        self._estimate_timer.timeout.connect(self._start_estimate)
         self._pdf_path: str | None = None
         self._psdi_path: str | None = None
         self._last_archive: str | None = None
@@ -81,6 +98,22 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self.log("Prêt. Sélectionnez un PDF à compresser ou une archive .psdi à recomposer.", "info")
+
+    def _size_to_screen(self, width: int, height: int) -> None:
+        """Open at the requested size, or smaller when the screen is smaller.
+
+        A 1360x768 laptop leaves roughly 700 px of work area once the taskbar
+        and title bar are gone, so a window asking for 720 opens with its
+        bottom edge off-screen. Clamping to the available geometry costs
+        nothing on a desktop monitor and is the difference between usable and
+        unusable on the machines an exercise actually provides.
+        """
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, max(700, available.width() - 40))
+            height = min(height, max(480, available.height() - 60))
+        self.resize(width, height)
 
     # ---------------------------------------------------------------- UI ---
     def _build_ui(self) -> None:
@@ -164,6 +197,7 @@ class MainWindow(QMainWindow):
         self.estimate_label = QLabel("—")
         _dim(self.estimate_label)
         self.estimate_label.setWordWrap(True)
+        self.estimate_label.setTextFormat(Qt.TextFormat.RichText)
         grid.addWidget(self.estimate_label, 3, 0, 1, 3)
 
         buttons = QHBoxLayout()
@@ -333,32 +367,63 @@ class MainWindow(QMainWindow):
         )
 
     def update_estimates(self) -> None:
-        """Show a rough on-air time before anything is compressed.
-
-        The ratio used here is a preset-derived guess, not a measurement; the
-        real figure replaces it as soon as compression finishes.
-        """
+        """Schedule a measurement of the archive this PDF would produce."""
         if not self._pdf_path:
             self.estimate_label.setText("—")
+            self._estimate_timer.stop()
             return
 
-        quality = self.quality_combo.currentData()
-        rough_ratio = {"ultra_low": 0.05, "low": 0.10,
-                       "medium": 0.20, "high": 0.25}[quality]
-        if self.skip_images.isChecked():
-            rough_ratio *= 0.4
+        self.estimate_label.setText("Estimation en cours…")
+        self._estimate_timer.start()
 
-        estimated = int(os.path.getsize(self._pdf_path) * rough_ratio)
-        from ..presets import estimate_times
+    def _start_estimate(self) -> None:
+        if not self._pdf_path:
+            return
+        # A real compression is already running; its own result will be more
+        # authoritative than an estimate, so do not compete for the CPU.
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if self._estimator is not None and self._estimator.isRunning():
+            # Let the running one finish and re-measure afterwards, otherwise
+            # a quick series of changes leaves the label on a stale figure.
+            self._estimate_timer.start()
+            return
 
-        times = estimate_times(estimated)
-        size_text = format_bytes(estimated)
-        self.estimate_label.setText(
-            f"Archive estimée ≈ {size_text}   ·   "
-            f"Packet 1200 {format_duration(times[MODE_PACKET_1200])}   ·   "
-            f"VARA HF {format_duration(times[MODE_VARA_HF])}   ·   "
+        self._estimator = EstimateWorker(
+            self._pdf_path, self.quality_combo.currentData(),
+            self.skip_images.isChecked(),
+        )
+        self._estimator.finished_ok.connect(self._on_estimate_ready)
+        self._estimator.failed.connect(self._on_estimate_failed)
+        self._estimator.start()
+
+    def _on_estimate_ready(self, path: str, info: dict) -> None:
+        # The operator may have picked another file while this ran.
+        if path != self._pdf_path:
+            return
+
+        times = info["estimates"]
+        size = info["archive_size"]
+        text = (
+            f"Archive : {format_bytes(size)} &nbsp;·&nbsp; "
+            f"Packet 1200 {format_duration(times[MODE_PACKET_1200])} &nbsp;·&nbsp; "
+            f"VARA HF {format_duration(times[MODE_VARA_HF])} &nbsp;·&nbsp; "
             f"VARA FM {format_duration(times[MODE_VARA_FM_NARROW])}"
         )
+        if size > WINLINK_MAX_ATTACHMENT:
+            # This is the line that decides whether the message goes through,
+            # so it must not read like the rest of the dimmed estimate.
+            colour = log_colors()["warning"]
+            text += (
+                f'<br><span style="color:{colour}">Au-dessus de la limite '
+                f"Winlink de {WINLINK_MAX_ATTACHMENT // 1024} ko — "
+                f"choisissez une qualité inférieure.</span>"
+            )
+        self.estimate_label.setText(text)
+
+    def _on_estimate_failed(self, message: str) -> None:
+        self.estimate_label.setText("—")
+        log.debug("%s", message)
 
     def do_compress(self) -> None:
         if not self._pdf_path:
@@ -546,12 +611,65 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Échec de l'intégration", str(exc))
         self._refresh_shell_action()
 
+    # ------------------------------------------------------- drag & drop --
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accept a single PDF or archive dropped on the window."""
+        if self._dropped_path(event) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragEnterEvent) -> None:
+        if self._dropped_path(event) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        path = self._dropped_path(event)
+        if path is None:
+            event.ignore()
+            return
+
+        event.acceptProposedAction()
+        # Route by extension: the two panels take different files, and making
+        # the operator aim at the right half of the window would defeat the
+        # convenience entirely.
+        if path.lower().endswith(".pdf"):
+            self.load_pdf(path)
+        else:
+            self.load_psdi(path)
+
+    @staticmethod
+    def _dropped_path(event) -> str | None:
+        """Return the dropped file path when it is one we can open."""
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return None
+
+        paths = [
+            url.toLocalFile() for url in mime.urls()
+            if url.isLocalFile() and url.toLocalFile()
+        ]
+        if len(paths) != 1:
+            # Several files at once is ambiguous: which panel would they go
+            # to, and in what order? Better to decline than to guess.
+            return None
+
+        path = paths[0]
+        if not os.path.isfile(path):
+            return None
+        return path if path.lower().endswith((".pdf", ".psdi")) else None
+
     def closeEvent(self, event) -> None:
         """Do not tear the window down while a conversion is in flight.
 
         Destroying a running QThread aborts the process, which during an
         exercise looks like a crash and loses the log.
         """
+        if self._estimator is not None and self._estimator.isRunning():
+            self._estimator.wait(3000)
+
         if self._worker is not None and self._worker.isRunning():
             answer = QMessageBox.question(
                 self, "Conversion en cours",

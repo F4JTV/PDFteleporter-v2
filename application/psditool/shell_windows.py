@@ -44,6 +44,15 @@ PSDI_VERB_KEY = rf"{PSDI_PROGID_KEY}\shell\PDFteleporterRebuild"
 PDF_VERB_LABEL = "Téléporter : compresser en .psdi"
 PSDI_VERB_LABEL = "Téléporter : recomposer le PDF"
 
+# Submenu entries, fastest transfer first. The identifiers are what reaches
+# the command line; only the labels are French.
+QUALITY_MENU = (
+    ("ultra_low", "Très basse  —  urgence, Packet 1200 bauds"),
+    ("low", "Basse  —  Packet 9600 / VARA HF lent"),
+    ("medium", "Moyenne  —  VARA HF / FM"),
+    ("high", "Haute  —  VARA FM rapide"),
+)
+
 
 def is_supported() -> bool:
     return os.name == "nt"
@@ -79,51 +88,20 @@ def _launcher() -> tuple[str, str]:
     return executable, f'"{os.path.join(package_root, "pdfteleporter.py")}"'
 
 
-def _command(action: str) -> str:
+def _command(action: str, quality: str | None = None) -> str:
     executable, prefix = _launcher()
     parts = [f'"{executable}"']
     if prefix:
         parts.append(prefix)
     parts.extend([f"--{action}", '"%1"'])
+    if quality:
+        parts.extend(["--quality", quality])
     return " ".join(parts)
 
 
 def _icon() -> str:
     executable, _ = _launcher()
     return executable
-
-
-def install(scope: str = SCOPE_USER) -> None:
-    """Register both verbs. Safe to run repeatedly; it overwrites in place."""
-    if not is_supported():
-        raise RuntimeError("Context-menu integration is Windows-only")
-
-    import winreg
-
-    root = _root(scope)
-
-    with winreg.CreateKey(root, PDF_VERB_KEY) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PDF_VERB_LABEL)
-        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
-    with winreg.CreateKey(root, PDF_VERB_KEY + r"\command") as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, _command("compress"))
-
-    # Give .psdi a ProgID of its own so the file type has a name and an icon
-    # in Explorer, not just a verb.
-    with winreg.CreateKey(root, PSDI_EXT_KEY) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PROGID)
-    with winreg.CreateKey(root, PSDI_PROGID_KEY) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, "Archive PDF Teleporter")
-    with winreg.CreateKey(root, PSDI_PROGID_KEY + r"\DefaultIcon") as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, f"{_icon()},0")
-
-    with winreg.CreateKey(root, PSDI_VERB_KEY) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PSDI_VERB_LABEL)
-        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
-    with winreg.CreateKey(root, PSDI_VERB_KEY + r"\command") as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, _command("rebuild"))
-
-    _notify_shell()
 
 
 def _delete_tree(root, path: str) -> None:
@@ -144,6 +122,69 @@ def _delete_tree(root, path: str) -> None:
         # An all-users key reached without elevation. Report nothing: the
         # uninstaller runs elevated and will succeed there.
         pass
+
+
+def install(scope: str = SCOPE_USER) -> None:
+    """Register both verbs, replacing any earlier registration entirely."""
+    if not is_supported():
+        raise RuntimeError("Context-menu integration is Windows-only")
+
+    import winreg
+
+    root = _root(scope)
+
+    # Clear the verb keys before rewriting them. Overwriting in place is not
+    # enough: an earlier version registered the PDF verb as a plain command,
+    # and a leftover "command" subkey makes Explorer run it directly and
+    # ignore SubCommands entirely -- the submenu then never opens, with no
+    # error anywhere. Deleting first is the only way to be sure the key holds
+    # what this version intends and nothing else.
+    _delete_tree(root, PDF_VERB_KEY)
+    _delete_tree(root, PSDI_VERB_KEY)
+
+    # The PDF verb opens a cascading submenu rather than compressing at a
+    # fixed quality. Which preset to use is the one decision the operator
+    # actually has to make, and forcing them through the full interface to
+    # make it defeats the point of a right-click.
+    #
+    # A cascade is declared by MUIVerb plus an empty SubCommands value, with
+    # the entries in a nested "shell" key. The empty SubCommands is not an
+    # oversight: a non-empty one would name static verbs to pull in from
+    # elsewhere, whereas an empty one tells Explorer to enumerate the nested
+    # key. Omitting the value entirely produces no submenu at all.
+    # The parent of a cascade must carry no default value and no command
+    # subkey; either one turns it back into an ordinary verb.
+    with winreg.CreateKey(root, PDF_VERB_KEY) as key:
+        winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, PDF_VERB_LABEL)
+        winreg.SetValueEx(key, "SubCommands", 0, winreg.REG_SZ, "")
+        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
+
+    # Sorted by key name, so the numeric prefix fixes the order: fastest
+    # transfer first, which is the one an operator under pressure wants.
+    for index, (quality, label) in enumerate(QUALITY_MENU):
+        entry = rf"{PDF_VERB_KEY}\shell\{index:02d}{quality}"
+        with winreg.CreateKey(root, entry) as key:
+            winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, label)
+        with winreg.CreateKey(root, entry + r"\command") as key:
+            winreg.SetValueEx(key, None, 0, winreg.REG_SZ,
+                              _command("compress", quality))
+
+    # Give .psdi a ProgID of its own so the file type has a name and an icon
+    # in Explorer, not just a verb.
+    with winreg.CreateKey(root, PSDI_EXT_KEY) as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PROGID)
+    with winreg.CreateKey(root, PSDI_PROGID_KEY) as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, "Archive PDF Teleporter")
+    with winreg.CreateKey(root, PSDI_PROGID_KEY + r"\DefaultIcon") as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, f"{_icon()},0")
+
+    with winreg.CreateKey(root, PSDI_VERB_KEY) as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PSDI_VERB_LABEL)
+        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
+    with winreg.CreateKey(root, PSDI_VERB_KEY + r"\command") as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, _command("rebuild"))
+
+    _notify_shell()
 
 
 def uninstall(scope: str | None = None) -> None:
