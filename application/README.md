@@ -145,6 +145,58 @@ produit une page pivotée de 90° sur fond noir. La détection repère la rotati
 et les pages majoritairement image sans texte, et bascule d'elle-même en
 journalisant pourquoi.
 
+### Fontes sans table ToUnicode
+
+Un PDF annoté sous Okular — ou avec tout outil qui embarque une fonte CID en
+encodage Identity sans table ToUnicode — expose ses saisies sous forme
+d'identifiants de glyphes, pas de caractères. Le texte est perdu pour tout
+lecteur, PyMuPDF compris ; seuls les glyphes dessinés subsistent.
+
+L'heuristique de ligatures héritée de l'original transformait chaque glyphe
+non résolu en « ti » : `F4LTV` ressortait en `tititititi`, et le reste de la
+page étant parfait, rien ne signalait la perte. Le discriminant est simple : une
+ligature est un glyphe isolé dans un mot lisible, alors qu'une saisie perdue
+l'est en entier. La détection se fait **au niveau du dictionnaire de fontes**
+(sous-type Type0, encodage Identity, pas de ToUnicode) plutôt que sur les
+caractères, parce qu'un identifiant de glyphe qui coïncide avec un code ASCII
+imprimable paraît lisible et passerait tout test textuel.
+
+Le rapprochement entre le nom du dictionnaire et celui que rapporte le fragment
+tolère la troncature : les producteurs plafonnent `BaseFont` à 31 caractères,
+si bien que « DejaVu Sans Condensed Bold Oblique » est stocké amputé alors que
+le fragment porte le nom complet. Un second filet, textuel, condamne tout
+fragment contenant ne serait-ce qu'un caractère de contrôle — la prose n'en
+contient jamais — là où un jugement par proportion laissait passer `)\x17/79`,
+rendu d'Arial pour `F4LTV`, qui paraît lisible à 80 %. Le test de non-régression
+balaie plusieurs fontes, Arial compris sous Windows, parce que le premier
+correctif passait sur DejaVu et échouait sur Arial.
+
+Les fragments concernés sont rastérisés par le même mécanisme que les
+illustrations : le raster reproduit exactement ce que l'opérateur a tapé, et
+l'archive reste lisible par tout décodeur du format. Le mode « texte seul » les
+conserve aussi — l'opérateur a choisi d'écarter les images, pas de perdre ses
+propres saisies. Le test de non-régression construit un vrai PDF privé de sa
+table ToUnicode plutôt qu'une simulation sur des chaînes.
+
+### Images en entrée
+
+Une photographie de formulaire prise au téléphone ou un scan JPEG, PNG, TIFF,
+BMP ou WebP se compresse comme un PDF. Il n'y a pas de couche texte à
+structurer : l'image devient une page de l'archive version 2, telle quelle, et
+toute station lisant ce format la recompose sans rien connaître de nouveau.
+
+Un TIFF multipage donne une page par image. L'orientation EXIF est appliquée,
+sans quoi une photo prise en travers ressortirait en travers. La transparence
+est aplatie sur blanc, la couleur du papier. La taille de page est choisie pour
+que le grand côté corresponde à celui d'un A4, en gardant exactement le rapport
+d'aspect, et l'image est ré-échantillonnée à la résolution du préréglage — une
+photo de 12 mégapixels et un scan à 150 ppp de la même feuille pèsent la même
+chose sur l'air. Une page A4 photographiée tient dans environ 30 ko en « Très
+basse », lisible.
+
+Le menu contextuel propose le même sous-menu de qualités sur ces types de
+fichiers.
+
 ### Illustrations vectorielles
 
 Un graphique en secteurs est fait d'arcs, une courbe de segments obliques : le

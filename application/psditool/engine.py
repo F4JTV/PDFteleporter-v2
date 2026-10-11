@@ -138,6 +138,37 @@ def _hex_to_rgb(hex_color: str):
         return None
 
 
+# A span whose replacement characters outnumber its readable ones is not a
+# word with a ligature in it; it is text whose font carries no ToUnicode table
+# at all. Guessing a ligature for every glyph turns a callsign into a string
+# of "ti", silently. Half is the dividing line: real ligatures are one or two
+# glyphs inside an otherwise readable word, so their share never approaches it.
+_UNREADABLE_RATIO = 0.5
+
+
+def _is_unreadable(text: str) -> bool:
+    """Report whether a span's text was lost to a missing ToUnicode table.
+
+    Two symptoms, depending on the font. A simple font yields U+FFFD for each
+    unmapped glyph. A CID font with Identity encoding yields the raw glyph
+    identifiers instead, which land as C0 control characters and stray
+    punctuation -- "F4LTV" arrives as ")\\x17/79".
+
+    Replacement characters are judged by share, because a real ligature is
+    one lost glyph inside an otherwise readable word. A control character is
+    different: prose never contains one at all, so a single occurrence is
+    enough to condemn the span. Without that distinction ")\\x17/79" -- one
+    control character among five -- reads as 80% fine and slips through.
+    """
+    visible = [c for c in text if not c.isspace()]
+    if not visible:
+        return False
+    if any(ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 for c in visible):
+        return True
+    lost = sum(1 for c in visible if c == "\ufffd")
+    return lost / len(visible) >= _UNREADABLE_RATIO
+
+
 def _normalize_text(text: str) -> str:
     """Undo the ligature damage described above.
 
@@ -145,6 +176,11 @@ def _normalize_text(text: str) -> str:
     substitution is guessed from context: "tt" before an accented e or after
     "lu", "ti" otherwise. That covers the French vocabulary this is used on
     (situation, lutte, quitté, pollution) without a dictionary.
+
+    This guess is only safe for the odd lost glyph inside a readable word.
+    A span that is mostly replacement characters never reaches here: the
+    caller rasterises it instead, because no amount of guessing recovers a
+    value typed by an operator in a font that carries no ToUnicode table.
     """
     for src, dst in _LIGATURES.items():
         text = text.replace(src, dst)
@@ -492,6 +528,129 @@ def _merge_boxes(boxes: list, pad: float = 8.0) -> list:
     return merged
 
 
+def _fonts_without_unicode(page) -> set:
+    """Return the names of fonts on this page whose text cannot be decoded.
+
+    The decisive combination is a CID font with Identity encoding and no
+    ToUnicode table. Identity means the bytes in the content stream are glyph
+    identifiers, not character codes; ToUnicode is the only thing that maps
+    them back to text, and without it every reader -- PyMuPDF included --
+    can only guess. A simple font with WinAnsi or MacRoman encoding decodes
+    on its own and is never on this list.
+
+    Reading the font dictionary is more reliable than inspecting the text:
+    a glyph id that happens to coincide with a printable ASCII code looks
+    perfectly readable and would slip past any text-based test. The names
+    are matched against the span's reported font, which PyMuPDF derives from
+    the same BaseFont entry.
+    """
+    doc = page.parent
+    names = set()
+    for font in page.get_fonts(full=True):
+        xref, _ext, subtype, basefont, _refname, encoding = font[:6]
+        if subtype != "Type0" or not str(encoding).startswith("Identity"):
+            continue
+        try:
+            has_table = doc.xref_get_key(xref, "ToUnicode")[0] != "null"
+        except Exception:  # noqa: BLE001
+            has_table = True   # unsure: do not rasterise on a guess
+        if has_table:
+            continue
+        names.add(_font_key(basefont))
+        raw = basefont.split("+")[-1].replace(" ", "").replace("-", "").lower()
+        if raw:
+            names.add(raw)
+    return names
+
+
+def _font_key(name: str) -> str:
+    """Normalise a font name for comparison across PyMuPDF's two spellings.
+
+    The font dictionary says "DejaVu Sans Book"; the span says "DejaVuSans".
+    Subset prefixes ("ABCDEF+"), spaces, hyphens and the style words that
+    PyMuPDF drops from span names are all stripped so both sides meet.
+    """
+    name = name.split("+")[-1]
+    name = name.replace(" ", "").replace("-", "").replace("_", "")
+    for style in ("BoldItalic", "BoldOblique", "Italic", "Oblique", "Bold",
+                  "Regular", "Book", "Roman", "Medium", "Light"):
+        if name.endswith(style):
+            name = name[: -len(style)]
+    return name.lower()
+
+
+def _font_matches(span_font: str, bad_fonts: set) -> bool:
+    """Match a span's font against the dictionary names, tolerating truncation.
+
+    PDF producers cap BaseFont at 31 characters, so "DejaVu Sans Condensed
+    Bold Oblique" is stored as "DejaVu Sans Condensed Bold Obli" while the
+    span reports the full name. Neither normalised form is a prefix of the
+    other once style words are stripped from one side only, so the raw
+    lower-cased forms are compared as prefixes in both directions as well.
+    """
+    key = _font_key(span_font)
+    if key in bad_fonts:
+        return True
+    raw = span_font.split("+")[-1].replace(" ", "").replace("-", "").lower()
+    for bad in bad_fonts:
+        if len(bad) >= 6 and (raw.startswith(bad) or bad.startswith(raw)
+                              or key.startswith(bad) or bad.startswith(key)):
+            return True
+    return False
+
+
+def _span_is_lost(span, bad_fonts: set) -> bool:
+    """Decide whether a span's text was lost to a missing ToUnicode table."""
+    font = span.get("font", "")
+    if font and bad_fonts and _font_matches(font, bad_fonts):
+        return True
+    # Fallback for producers PyMuPDF reports oddly: the text itself is
+    # mostly replacement or control characters.
+    text = "".join(c["c"] for c in span.get("chars", [])) if "chars" in span \
+        else span.get("text", "")
+    return _is_unreadable(text)
+
+
+def _unreadable_text_regions(page) -> list:
+    """Return the boxes of text whose font carries no ToUnicode table.
+
+    PyMuPDF reports every glyph it cannot map as U+FFFD. The characters are
+    gone for good -- there is nothing to decode -- but the glyphs are still
+    drawn on the page, so rasterising their box reproduces exactly what the
+    operator typed. This is what keeps a callsign entered in Okular from
+    coming out as "tititititi".
+
+    These are not merged with the artwork regions and not subject to the
+    page-fraction ceiling: a form with forty annotated fields is still a form,
+    and every one of those fields has to survive.
+    """
+    bad_fonts = _fonts_without_unicode(page)
+    boxes = []
+    for block in page.get_text("rawdict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if not _span_is_lost(span, bad_fonts):
+                    continue
+                visible = [c for c in span["chars"] if c["c"].strip()]
+                if not visible:
+                    continue
+                box = fitz.Rect(
+                    min(c["bbox"][0] for c in visible),
+                    min(c["bbox"][1] for c in visible),
+                    max(c["bbox"][2] for c in visible),
+                    max(c["bbox"][3] for c in visible),
+                ) & page.rect
+                if box.is_empty or box.width <= 0 or box.height <= 0:
+                    continue
+                # A little slack so the raster does not clip ascenders and
+                # descenders that the glyph box reports tightly.
+                boxes.append(box + (-1.5, -1.5, 1.5, 1.5))
+
+    return _merge_boxes(boxes, pad=3.0) if boxes else []
+
+
 def _artwork_regions(page) -> list:
     """Return the page areas that must be rasterised to survive at all.
 
@@ -640,7 +799,8 @@ def _covered(box, regions) -> bool:
 
 
 def _extract_page(page, page_idx: int, images_data: dict,
-                  precision: int = 1, artwork: list | None = None) -> dict:
+                  precision: int = 1, artwork: list | None = None,
+                  bad_fonts: set | None = None) -> dict:
     """Build the manifest entry for one page.
 
     Content falling inside a rasterised artwork region is skipped: it is
@@ -648,6 +808,7 @@ def _extract_page(page, page_idx: int, images_data: dict,
     rectangle produces a sharp copy sitting on top of a blurred one.
     """
     artwork = artwork or []
+    bad_fonts = bad_fonts if bad_fonts is not None else _fonts_without_unicode(page)
     page_data: dict = {"pn": page_idx + 1, "tb": [], "ir": [], "dr": [], "ck": []}
 
     # --- text -------------------------------------------------------------
@@ -663,11 +824,22 @@ def _extract_page(page, page_idx: int, images_data: dict,
                 continue
             out_line: dict = {"b": _quantize_box(line["bbox"], precision), "s": []}
             for span in line.get("spans", []):
+                if _span_is_lost(span, bad_fonts):
+                    # Lost to a missing ToUnicode table. The raster made from
+                    # this span's box carries the real glyphs; a transcription
+                    # here would paint a wrong string on the right picture.
+                    continue
                 font_key, family = _classify_font(span.get("font", ""))
                 size = _quantize(span.get("size", 8), 1)
                 colour = span.get("color", 0)
 
                 for raw_text, box in _split_span_runs(span):
+                    if _is_unreadable(raw_text):
+                        # Lost to a missing ToUnicode table. The raster made
+                        # from this span's box carries the real glyphs; a
+                        # guessed transcription here would only paint a
+                        # wrong string on top of the right picture.
+                        continue
                     text = _normalize_text(raw_text)
                     if not text.strip():
                         continue
@@ -847,6 +1019,9 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
 
         for page_idx, page in enumerate(doc):
             regions = [] if skip_images else _artwork_regions(page)
+            # Unreadable text is rasterised whatever the image setting: the
+            # operator chose to drop pictures, not to lose their own entries.
+            regions = regions + _unreadable_text_regions(page)
 
             rendered = []
             for region in regions:
@@ -906,6 +1081,103 @@ def _compress_image(pdf_path: str, params: dict, progress_cb: ProgressFn) -> byt
         doc.close()
 
 
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+
+# A page is defined in points at 72 per inch. A phone photo of an A4 sheet is
+# several thousand pixels on its long side; mapping that to A4 keeps the
+# rebuilt page at a size every viewer and printer expects.
+_A4_WIDTH_PT = 595.0
+_A4_HEIGHT_PT = 842.0
+
+
+def is_image_file(path: str) -> bool:
+    return path.lower().endswith(IMAGE_EXTENSIONS)
+
+
+def _page_size_for(width_px: int, height_px: int) -> tuple[float, float]:
+    """Choose page dimensions in points for an image of this pixel size.
+
+    The image's aspect ratio is kept exactly; only the scale is chosen, so
+    that the longer side matches A4's longer side. Portrait and landscape are
+    both handled by comparing the two orientations.
+    """
+    if width_px <= 0 or height_px <= 0:
+        return _A4_WIDTH_PT, _A4_HEIGHT_PT
+    landscape = width_px > height_px
+    long_pt = _A4_HEIGHT_PT
+    if landscape:
+        return long_pt, long_pt * height_px / width_px
+    return long_pt * width_px / height_px, long_pt
+
+
+def _load_image_as_page(path: str) -> list[Image.Image]:
+    """Open an image file as one page per frame.
+
+    Multi-page TIFF scans are common from office copiers; each frame becomes
+    a page. Everything else is a single page. EXIF orientation is applied so
+    a phone photo taken sideways does not come out sideways -- a reader shows
+    the pixels as stored, not as the camera meant them.
+    """
+    from PIL import ImageOps
+
+    img = Image.open(path)
+    frames: list[Image.Image] = []
+    try:
+        index = 0
+        while True:
+            img.seek(index)
+            frame = ImageOps.exif_transpose(img.copy())
+            if frame.mode in ("RGBA", "LA", "P"):
+                # Flatten transparency onto white, the colour of paper.
+                background = Image.new("RGB", frame.size, (255, 255, 255))
+                rgba = frame.convert("RGBA")
+                background.paste(rgba, mask=rgba.split()[3])
+                frame = background
+            elif frame.mode != "RGB":
+                frame = frame.convert("RGB")
+            frames.append(frame)
+            index += 1
+    except EOFError:
+        pass
+    finally:
+        img.close()
+    return frames
+
+
+def _compress_image_file(path: str, params: dict, progress_cb: ProgressFn) -> bytes:
+    """Compress an image file as a page-image archive.
+
+    A photograph or scan has no text layer, so the structured encoding has
+    nothing to work with; the page-image container is the natural fit, and
+    it means the result rebuilds on any station that reads version 2
+    archives, with nothing new to learn.
+
+    The image is downsampled to the preset's DPI at the chosen page size, so
+    a 12-megapixel photo and a 150-DPI scan of the same sheet come out the
+    same size on the air.
+    """
+    frames = _load_image_as_page(path)
+    if not frames:
+        raise ValueError(f"No image data found in {path}")
+
+    dpi = params["dpi"]
+    pages: list[tuple[float, float, bytes]] = []
+    total = len(frames)
+
+    for i, frame in enumerate(frames):
+        _progress(progress_cb, i + 1, total + 1,
+                  f"Préparation de l'image {i + 1}/{total} ({dpi} ppp)…")
+        width_pt, height_pt = _page_size_for(*frame.size)
+        target = (max(1, int(round(width_pt * dpi / 72))),
+                  max(1, int(round(height_pt * dpi / 72))))
+        if frame.size != target:
+            frame = frame.resize(target, Image.LANCZOS)
+        pages.append((width_pt, height_pt,
+                      _encode_jpeg(frame, params["jpeg_quality"])))
+
+    return psdi.write_image(pages, params["lzma_preset"])
+
+
 def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
                    mode: str = MODE_STRUCT, output_path: str | None = None,
                    progress_cb: ProgressFn = None,
@@ -930,7 +1202,12 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
     started = time.time()
 
     auto_switch_reason = None
-    if mode == MODE_STRUCT:
+    if is_image_file(pdf_path):
+        # Not a PDF at all: a photo or scan. Only the page-image encoding
+        # applies, and the reason is recorded so the log says why.
+        mode = MODE_IMAGE
+        auto_switch_reason = "image"
+    elif mode == MODE_STRUCT:
         detected, reason = detect_optimal_mode(pdf_path)
         # Text-only transfers deliberately discard images, so a page that is
         # merely image-heavy is not a reason to switch. A rotated page is:
@@ -943,7 +1220,9 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
 
     _progress(progress_cb, 0, 3, f"Ouverture du PDF ({original_size // 1024} ko)…")
 
-    if mode == MODE_IMAGE:
+    if is_image_file(pdf_path):
+        archive_bytes = _compress_image_file(pdf_path, params, progress_cb)
+    elif mode == MODE_IMAGE:
         archive_bytes = _compress_image(pdf_path, params, progress_cb)
     else:
         archive_bytes = _compress_struct(pdf_path, params, progress_cb, skip_images)

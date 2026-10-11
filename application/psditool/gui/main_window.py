@@ -97,7 +97,8 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
-        self.log("Prêt. Sélectionnez un PDF à compresser ou une archive .psdi à recomposer.", "info")
+        self.log("Prêt. Sélectionnez un PDF ou une image à compresser, ou une "
+                 "archive .psdi à recomposer.", "info")
 
     def _size_to_screen(self, width: int, height: int) -> None:
         """Open at the requested size, or smaller when the screen is smaller.
@@ -170,10 +171,10 @@ class MainWindow(QMainWindow):
         grid = QGridLayout(box)
         grid.setColumnStretch(1, 1)
 
-        grid.addWidget(QLabel("PDF source"), 0, 0)
+        grid.addWidget(QLabel("Source"), 0, 0)
         self.pdf_edit = QLineEdit()
         self.pdf_edit.setReadOnly(True)
-        self.pdf_edit.setPlaceholderText("Aucun fichier sélectionné")
+        self.pdf_edit.setPlaceholderText("PDF ou image (JPEG, PNG, TIFF…)")
         grid.addWidget(self.pdf_edit, 0, 1)
         browse = QPushButton("Parcourir…")
         browse.clicked.connect(self.browse_pdf)
@@ -310,7 +311,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ actions --
     def browse_pdf(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Sélectionner un PDF", "", "Documents PDF (*.pdf);;Tous les fichiers (*)"
+            self, "Sélectionner un document", "",
+            "Documents et images (*.pdf *.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp);;"
+            "Documents PDF (*.pdf);;"
+            "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp);;"
+            "Tous les fichiers (*)",
         )
         if path:
             self.load_pdf(path)
@@ -320,8 +325,10 @@ class MainWindow(QMainWindow):
         self.pdf_edit.setText(path)
         self.compress_btn.setEnabled(True)
         size = os.path.getsize(path)
+        kind = "Image" if engine.is_image_file(path) else "PDF"
         self.log(
-            f"PDF sélectionné : {os.path.basename(path)} ({format_bytes(size)})",
+            f"{kind} sélectionné{'e' if kind == 'Image' else ''} : "
+            f"{os.path.basename(path)} ({format_bytes(size)})",
             "info",
         )
         self.update_estimates()
@@ -477,12 +484,16 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
 
         if info.get("auto_mode_switch"):
-            self.log(
-                f"Bascule automatique en mode image de page "
-                f"({_REASONS.get(info['auto_mode_switch'], info['auto_mode_switch'])}) "
-                f"— le document est scanné ou pivoté.",
-                "warning",
-            )
+            reason = info["auto_mode_switch"]
+            if reason == "image":
+                self.log("Source image : encodée en mode image de page.", "info")
+            else:
+                self.log(
+                    f"Bascule automatique en mode image de page "
+                    f"({_REASONS.get(reason, reason)}) — le document est scanné "
+                    f"ou pivoté.",
+                    "warning",
+                )
 
         times = info["estimates"]
         self.log(
@@ -635,10 +646,10 @@ class MainWindow(QMainWindow):
         # Route by extension: the two panels take different files, and making
         # the operator aim at the right half of the window would defeat the
         # convenience entirely.
-        if path.lower().endswith(".pdf"):
-            self.load_pdf(path)
-        else:
+        if path.lower().endswith(".psdi"):
             self.load_psdi(path)
+        else:
+            self.load_pdf(path)
 
     @staticmethod
     def _dropped_path(event) -> str | None:
@@ -659,7 +670,8 @@ class MainWindow(QMainWindow):
         path = paths[0]
         if not os.path.isfile(path):
             return None
-        return path if path.lower().endswith((".pdf", ".psdi")) else None
+        accepted = (".pdf", ".psdi") + engine.IMAGE_EXTENSIONS
+        return path if path.lower().endswith(accepted) else None
 
     def closeEvent(self, event) -> None:
         """Do not tear the window down while a conversion is in flight.

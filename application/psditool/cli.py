@@ -89,10 +89,11 @@ def cmd_compress(path: str, quality: str, output: str | None,
         f"VARA HF     : {format_duration(times[MODE_VARA_HF])}\n"
         f"VARA FM     : {format_duration(times[MODE_VARA_FM_NARROW])}"
     )
-    if info.get("auto_mode_switch"):
+    reason = info.get("auto_mode_switch")
+    if reason and reason != "image":
         summary += (
             f"\n\nBascule automatique en mode image de page "
-            f"({_REASONS.get(info['auto_mode_switch'], info['auto_mode_switch'])})."
+            f"({_REASONS.get(reason, reason)})."
         )
     if info["archive_size"] > WINLINK_MAX_ATTACHMENT:
         summary += (
@@ -170,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
 
-    compress = sub.add_parser("compress", help="PDF -> .psdi")
+    compress = sub.add_parser("compress", help="PDF ou image -> .psdi")
     compress.add_argument("input")
     compress.add_argument("-o", "--output")
     compress.add_argument("-q", "--quality", default=QUALITY_MEDIUM,

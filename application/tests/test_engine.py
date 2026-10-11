@@ -447,3 +447,206 @@ class TestColumnPositions(unittest.TestCase):
         }
         runs = engine._split_span_runs(span)
         self.assertEqual(len(runs), 1, "prose should not be split")
+
+
+
+class TestMissingToUnicode(unittest.TestCase):
+    """Text in a font without a ToUnicode table must be rasterised, not guessed.
+
+    The original turned every unmapped glyph into a guessed ligature, so a
+    callsign typed into a form under Okular came out as "tititititi" -- and
+    nothing flagged it. The labels around it were perfect, which is what made
+    the loss invisible.
+
+    Every available font is exercised, not just one: the first fix matched
+    font names and passed on DejaVuSans while failing on Arial.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.pdfs = []
+        for index, ttf in enumerate(fixtures.find_truetype_fonts()):
+            path = fixtures.annotated_without_tounicode(
+                os.path.join(cls._tmp.name, f"okular_{index}.pdf"), ttf
+            )
+            if path:
+                cls.pdfs.append((os.path.basename(ttf), path))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        if not self.pdfs:
+            self.skipTest("no TrueType font available to embed")
+
+    def _texts(self, data):
+        manifest = psdi.read_struct(data).manifest
+        return [span["t"] for page in manifest["pages"]
+                for block in page["tb"] for line in block["l"]
+                for span in line["s"]]
+
+    def test_fixture_really_lacks_the_table(self):
+        for font, pdf in self.pdfs:
+            with self.subTest(font=font):
+                doc = fitz.open(pdf)
+                try:
+                    bad = engine._fonts_without_unicode(doc[0])
+                    text = doc[0].get_text("text")
+                finally:
+                    doc.close()
+                self.assertTrue(bad, "the fixture should expose a font without ToUnicode")
+                self.assertNotIn("F4LTV", text, "the extractor should not see the entry")
+
+    def test_entries_are_never_transcribed(self):
+        for font, pdf in self.pdfs:
+            with self.subTest(font=font):
+                data, _ = engine.pdf_to_archive(pdf, quality="medium")
+                for text in self._texts(data):
+                    self.assertNotIn("titi", text, f"guessed ligatures leaked: {text!r}")
+                    for char in text:
+                        self.assertGreaterEqual(
+                            ord(char), 0x20, f"raw glyph id leaked into text: {text!r}"
+                        )
+
+    def test_readable_labels_stay_text(self):
+        for font, pdf in self.pdfs:
+            with self.subTest(font=font):
+                data, _ = engine.pdf_to_archive(pdf, quality="medium")
+                joined = " ".join(self._texts(data))
+                self.assertIn("Indicatif", joined)
+                self.assertIn("lutte", joined)   # the genuine ligature path still works
+
+    def test_entries_survive_as_raster(self):
+        for font, pdf in self.pdfs:
+            with self.subTest(font=font):
+                data, _ = engine.pdf_to_archive(pdf, quality="medium")
+                parsed = psdi.read_struct(data)
+                refs = parsed.manifest["pages"][0]["ir"]
+                self.assertGreaterEqual(len(refs), 2, "one raster per lost entry")
+                for ref in refs:
+                    self.assertIn(ref["x"], parsed.images)
+
+    def test_text_only_mode_still_keeps_the_entries(self):
+        # Dropping pictures is a choice the operator makes; losing their own
+        # entries is not. The rasters must be produced regardless.
+        for font, pdf in self.pdfs:
+            with self.subTest(font=font):
+                data, _ = engine.pdf_to_archive(pdf, quality="low", skip_images=True)
+                self.assertGreaterEqual(len(psdi.read_struct(data).images), 2)
+
+    def test_genuine_ligature_heuristic_is_unaffected(self):
+        self.assertEqual(engine._normalize_text("situa\ufffdon"), "situation")
+        self.assertEqual(engine._normalize_text("lu\ufffde"), "lutte")
+        self.assertFalse(engine._is_unreadable("situa\ufffdon"))
+        self.assertTrue(engine._is_unreadable("\ufffd\ufffd\ufffd\ufffd\ufffd"))
+
+    def test_a_single_control_character_condemns_a_span(self):
+        # ")\x17/79" is Arial's rendering of F4LTV: four printable glyph ids
+        # and one control character. Judged by share it looks 80% readable.
+        self.assertTrue(engine._is_unreadable(")\x17/79"))
+        self.assertFalse(engine._is_unreadable("(voir p. 4)"))
+
+    def test_truncated_basefont_still_matches(self):
+        # BaseFont is capped at 31 characters by producers; the span reports
+        # the full name. Both must resolve to the same font.
+        bad = {engine._font_key("DejaVu Sans Condensed Bold Obli"),
+               "dejavusanscondensedboldobli"}
+        self.assertTrue(engine._font_matches("DejaVuSansCondensed-BoldOblique", bad))
+        self.assertFalse(engine._font_matches("Helvetica", bad))
+
+
+class TestImageInput(unittest.TestCase):
+    """A photo or scan is a page with no text layer: page-image mode, as is."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PIL import Image, ImageDraw
+
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Image.new("RGB", (1600, 2200), (236, 233, 226))
+        draw = ImageDraw.Draw(base)
+        for i in range(20):
+            draw.text((120, 120 + i * 90), f"Ligne {i} du formulaire", fill=(30, 30, 40))
+
+        cls.jpeg = os.path.join(cls._tmp.name, "scan.jpg")
+        base.save(cls.jpeg, quality=90)
+
+        cls.png_alpha = os.path.join(cls._tmp.name, "scan.png")
+        base.convert("RGBA").save(cls.png_alpha)
+
+        cls.landscape = os.path.join(cls._tmp.name, "wide.jpg")
+        base.transpose(Image.ROTATE_90).save(cls.landscape, quality=90)
+
+        cls.multipage = os.path.join(cls._tmp.name, "scan.tif")
+        # Uncompressed on purpose: the multi-page structure is what is under
+        # test, and naming a compressor would make the fixture depend on
+        # which codecs the installed Pillow was built with.
+        base.save(cls.multipage, save_all=True, append_images=[base.rotate(180)])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_extension_detection(self):
+        for path in (self.jpeg, self.png_alpha, self.landscape, self.multipage):
+            self.assertTrue(engine.is_image_file(path), path)
+        self.assertFalse(engine.is_image_file("report.pdf"))
+        self.assertFalse(engine.is_image_file("archive.psdi"))
+
+    def test_image_becomes_a_version_2_archive(self):
+        for path in (self.jpeg, self.png_alpha):
+            with self.subTest(path=os.path.basename(path)):
+                data, info = engine.pdf_to_archive(path, quality="low")
+                self.assertEqual(psdi.peek_version(data), psdi.ARCHIVE_VERSION_IMAGE)
+                self.assertEqual(info["mode"], engine.MODE_IMAGE)
+                self.assertEqual(info["auto_mode_switch"], "image")
+                self.assertTrue(psdi.validate(data)["valid"])
+
+    def test_page_size_keeps_aspect_and_fits_a4(self):
+        portrait = engine._page_size_for(1600, 2200)
+        self.assertAlmostEqual(portrait[1], 842.0)
+        self.assertAlmostEqual(portrait[0] / portrait[1], 1600 / 2200, places=3)
+
+        landscape = engine._page_size_for(2200, 1600)
+        self.assertAlmostEqual(landscape[0], 842.0)
+        self.assertGreater(landscape[0], landscape[1])
+
+    def test_landscape_image_rebuilds_landscape(self):
+        target = os.path.join(self._tmp.name, "wide.pdf")
+        data, _ = engine.pdf_to_archive(self.landscape, quality="low")
+        engine.archive_to_pdf(data, output_path=target)
+        doc = fitz.open(target)
+        try:
+            self.assertGreater(doc[0].rect.width, doc[0].rect.height)
+        finally:
+            doc.close()
+
+    def test_multipage_tiff_gives_one_page_per_frame(self):
+        data, _ = engine.pdf_to_archive(self.multipage, quality="low")
+        self.assertEqual(len(psdi.read_image(data).pages), 2)
+
+    def test_transparent_png_is_flattened_on_white(self):
+        import io
+
+        from PIL import Image
+
+        data, _ = engine.pdf_to_archive(self.png_alpha, quality="low")
+        payload = psdi.read_image(data).pages[0][2]
+        image = Image.open(io.BytesIO(payload))
+        self.assertIn(image.mode, ("RGB", "L"))
+
+    def test_output_is_downsampled_to_the_preset(self):
+        # A 12-megapixel photo and a 150-DPI scan of the same sheet must come
+        # out the same size on the air.
+        small, _ = engine.pdf_to_archive(self.jpeg, quality="ultra_low")
+        large, _ = engine.pdf_to_archive(self.jpeg, quality="high")
+        self.assertLess(len(small), len(large))
+        self.assertLess(len(small), 60_000, "ultra_low should fit a Packet transfer")
+
+    def test_explicit_struct_mode_is_overridden_for_images(self):
+        # There is no text layer to structure; asking for it must not fail.
+        data, info = engine.pdf_to_archive(self.jpeg, quality="low",
+                                           mode=engine.MODE_STRUCT)
+        self.assertEqual(info["mode"], engine.MODE_IMAGE)

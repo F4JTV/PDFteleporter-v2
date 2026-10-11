@@ -51,7 +51,13 @@ if not exist "%VPY%" (
     set "NEEDS_INSTALL=1"
 )
 
-for /f "delims=" %%V in ('"%VPY%" -c "import sys;print(sys.version.split()[0])"') do set "PYVER=%%V"
+rem The interpreter version is captured through a temporary file rather than
+rem a for /f command. When the command inside for /f starts with a quote,
+rem cmd.exe strips it together with the last quote on the line, which cuts
+rem the -c argument in half and fails with "is not recognized as a command".
+"%VPY%" -c "import sys;print(sys.version.split()[0])" > "%TEMP%\pdft_pyver.txt" 2>nul
+set /p PYVER=<"%TEMP%\pdft_pyver.txt"
+del "%TEMP%\pdft_pyver.txt" >nul 2>&1
 echo     Interpreter: %VPY%  ^(Python !PYVER!^)
 
 rem Install only when something is actually missing, so a repeat build does
@@ -78,9 +84,14 @@ rem ---------------------------------------------------------------- 2/5 ---
 rem Shipping a binary that fails its own interoperability vectors is worse
 rem than not shipping one.
 echo [2/5] Running tests...
-"%VPY%" -m unittest discover -s tests -t . -b >nul 2>&1 || (
-    echo ERROR: tests failed. Run for details:
-    echo        "%VPY%" -m unittest discover -s tests -t . -v
+rem Output goes to a log so a failure can be read instead of guessed at. The
+rem log is printed only when something fails, so a green run stays quiet.
+"%VPY%" -m unittest discover -s tests -t . > build\tests.log 2>&1 || (
+    echo ERROR: tests failed. Last lines of build\tests.log:
+    echo.
+    powershell -NoProfile -Command "Get-Content build\tests.log -Tail 40"
+    echo.
+    echo        Full log: build\tests.log
     exit /b 1
 )
 echo     Tests: OK

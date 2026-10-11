@@ -37,6 +37,16 @@ GUI_EXE_NAME = "PDFteleporter.exe"
 
 # Relative to the chosen root; identical under HKCU and HKLM.
 PDF_VERB_KEY = r"Software\Classes\SystemFileAssociations\.pdf\shell\PDFteleporterCompress"
+
+# The same cascade is attached to each image type. Explorer keys verbs by
+# extension, so one key per extension is unavoidable; SystemFileAssociations
+# is used rather than the ProgID so the entries survive whatever viewer the
+# operator has set as default for pictures.
+IMAGE_EXTENSIONS_FOR_MENU = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+
+
+def _image_verb_key(extension: str) -> str:
+    return rf"Software\Classes\SystemFileAssociations\{extension}\shell\PDFteleporterCompress"
 PSDI_EXT_KEY = r"Software\Classes\.psdi"
 PSDI_PROGID_KEY = rf"Software\Classes\{PROGID}"
 PSDI_VERB_KEY = rf"{PSDI_PROGID_KEY}\shell\PDFteleporterRebuild"
@@ -124,6 +134,35 @@ def _delete_tree(root, path: str) -> None:
         pass
 
 
+def _write_quality_cascade(root, verb_key: str) -> None:
+    """Write the compress-with-quality submenu under one verb key.
+
+    A cascade is declared by MUIVerb plus an empty SubCommands value, with
+    the entries in a nested "shell" key. The empty SubCommands is not an
+    oversight: a non-empty one would name static verbs to pull in from
+    elsewhere, whereas an empty one tells Explorer to enumerate the nested
+    key. Omitting the value entirely produces no submenu at all. The parent
+    must also carry no default value and no command subkey; either one turns
+    it back into an ordinary verb that runs directly.
+    """
+    import winreg
+
+    with winreg.CreateKey(root, verb_key) as key:
+        winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, PDF_VERB_LABEL)
+        winreg.SetValueEx(key, "SubCommands", 0, winreg.REG_SZ, "")
+        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
+
+    # Sorted by key name, so the numeric prefix fixes the order: fastest
+    # transfer first, which is the one an operator under pressure wants.
+    for index, (quality, label) in enumerate(QUALITY_MENU):
+        entry = rf"{verb_key}\shell\{index:02d}{quality}"
+        with winreg.CreateKey(root, entry) as key:
+            winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, label)
+        with winreg.CreateKey(root, entry + r"\command") as key:
+            winreg.SetValueEx(key, None, 0, winreg.REG_SZ,
+                              _command("compress", quality))
+
+
 def install(scope: str = SCOPE_USER) -> None:
     """Register both verbs, replacing any earlier registration entirely."""
     if not is_supported():
@@ -141,33 +180,16 @@ def install(scope: str = SCOPE_USER) -> None:
     # what this version intends and nothing else.
     _delete_tree(root, PDF_VERB_KEY)
     _delete_tree(root, PSDI_VERB_KEY)
+    for extension in IMAGE_EXTENSIONS_FOR_MENU:
+        _delete_tree(root, _image_verb_key(extension))
 
-    # The PDF verb opens a cascading submenu rather than compressing at a
-    # fixed quality. Which preset to use is the one decision the operator
-    # actually has to make, and forcing them through the full interface to
-    # make it defeats the point of a right-click.
-    #
-    # A cascade is declared by MUIVerb plus an empty SubCommands value, with
-    # the entries in a nested "shell" key. The empty SubCommands is not an
-    # oversight: a non-empty one would name static verbs to pull in from
-    # elsewhere, whereas an empty one tells Explorer to enumerate the nested
-    # key. Omitting the value entirely produces no submenu at all.
-    # The parent of a cascade must carry no default value and no command
-    # subkey; either one turns it back into an ordinary verb.
-    with winreg.CreateKey(root, PDF_VERB_KEY) as key:
-        winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, PDF_VERB_LABEL)
-        winreg.SetValueEx(key, "SubCommands", 0, winreg.REG_SZ, "")
-        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
-
-    # Sorted by key name, so the numeric prefix fixes the order: fastest
-    # transfer first, which is the one an operator under pressure wants.
-    for index, (quality, label) in enumerate(QUALITY_MENU):
-        entry = rf"{PDF_VERB_KEY}\shell\{index:02d}{quality}"
-        with winreg.CreateKey(root, entry) as key:
-            winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, label)
-        with winreg.CreateKey(root, entry + r"\command") as key:
-            winreg.SetValueEx(key, None, 0, winreg.REG_SZ,
-                              _command("compress", quality))
+    # Every compressible type gets the same cascading submenu. Which preset
+    # to use is the one decision the operator actually has to make, and
+    # forcing them through the full interface to make it defeats the point
+    # of a right-click.
+    for verb_key in (PDF_VERB_KEY,
+                     *(_image_verb_key(e) for e in IMAGE_EXTENSIONS_FOR_MENU)):
+        _write_quality_cascade(root, verb_key)
 
     # Give .psdi a ProgID of its own so the file type has a name and an icon
     # in Explorer, not just a verb.
@@ -204,6 +226,8 @@ def uninstall(scope: str | None = None) -> None:
         _delete_tree(root, PDF_VERB_KEY)
         _delete_tree(root, PSDI_PROGID_KEY)
         _delete_tree(root, PSDI_EXT_KEY)
+        for extension in IMAGE_EXTENSIONS_FOR_MENU:
+            _delete_tree(root, _image_verb_key(extension))
     _notify_shell()
 
 

@@ -121,3 +121,80 @@ def monochrome_scan_like(path: str) -> str:
     doc.save(path)
     doc.close()
     return path
+
+
+def find_truetype_fonts(limit: int = 4) -> list[str]:
+    """Locate a few embeddable TrueType files, preferring long-named ones.
+
+    Several fonts rather than one, because the failure this fixture guards
+    against depended on the font: a BaseFont longer than 31 characters is
+    truncated by the producer, and a matcher that passed on "DejaVuSans"
+    failed on "DejaVu Sans Condensed Bold Oblique" -- and on Arial, which is
+    what every Windows build machine actually has.
+    """
+    import glob
+
+    patterns = (
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/calibri.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "/usr/share/fonts/**/DejaVuSansCondensed-BoldOblique.ttf",
+        "/usr/share/fonts/**/DejaVuSans.ttf",
+        "/usr/share/fonts/**/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    )
+    found: list[str] = []
+    for pattern in patterns:
+        for hit in glob.glob(pattern, recursive=True):
+            if hit not in found:
+                found.append(hit)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _find_truetype() -> str | None:
+    fonts = find_truetype_fonts(limit=1)
+    return fonts[0] if fonts else None
+
+
+def annotated_without_tounicode(path: str, ttf: str | None = None) -> str | None:
+    """A form whose operator entries use a font with no ToUnicode table.
+
+    This is what Okular and several other annotation tools produce: an
+    embedded CID font with Identity encoding and no mapping back to text.
+    The labels stay in a base-14 font and decode normally; only the entries
+    are affected, which is exactly the shape of the real-world failure.
+
+    Returns None when no TrueType font is available to embed.
+    """
+    ttf = ttf or _find_truetype()
+    if ttf is None:
+        return None
+
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=200)
+    page.insert_text(fitz.Point(30, 50), "Indicatif :", fontname="helv", fontsize=12)
+    page.insert_text(fitz.Point(30, 80), "Fréquence :", fontname="helv", fontsize=12)
+    page.insert_text(fitz.Point(30, 110), "Situation stable, lutte en cours.",
+                     fontname="helv", fontsize=12)
+    page.insert_text(fitz.Point(120, 50), "F4LTV", fontname="entry",
+                     fontfile=ttf, fontsize=12)
+    page.insert_text(fitz.Point(120, 80), "145.500", fontname="entry",
+                     fontfile=ttf, fontsize=12)
+    doc.save(path)
+    doc.close()
+
+    # Strip the ToUnicode table from every CID font, as such tools do.
+    doc = fitz.open(path)
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "Type")[1] != "/Font":
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        if doc.xref_get_key(xref, "ToUnicode")[0] != "null":
+            doc.xref_set_key(xref, "ToUnicode", "null")
+    doc.save(path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    doc.close()
+    return path

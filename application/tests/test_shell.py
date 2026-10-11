@@ -256,3 +256,47 @@ class TestRegistryShape(unittest.TestCase):
         leftovers = [p for (r, p) in self.fake.keys if "PDFteleporter" in p
                      or p.endswith(".psdi")]
         self.assertFalse(leftovers, f"clés restantes : {leftovers}")
+
+
+class TestImageVerbs(unittest.TestCase):
+    def setUp(self):
+        import sys
+
+        self.fake = FakeRegistry()
+        self._saved = sys.modules.get("winreg")
+        sys.modules["winreg"] = self.fake
+        self._supported = shell_windows.is_supported
+        shell_windows.is_supported = lambda: True
+
+    def tearDown(self):
+        import sys
+
+        shell_windows.is_supported = self._supported
+        if self._saved is None:
+            sys.modules.pop("winreg", None)
+        else:
+            sys.modules["winreg"] = self._saved
+
+    def test_every_image_type_gets_the_same_cascade(self):
+        shell_windows.install(shell_windows.SCOPE_USER)
+        for extension in shell_windows.IMAGE_EXTENSIONS_FOR_MENU:
+            with self.subTest(extension=extension):
+                verb = shell_windows._image_verb_key(extension)
+                key = self.fake.keys[("HKCU", verb)]
+                self.assertEqual(key["SubCommands"], "")
+                entries = self.fake.subkeys_of("HKCU", verb + "\\shell")
+                self.assertEqual(len(entries), len(shell_windows.QUALITY_MENU))
+
+    def test_image_menu_extensions_match_the_engine(self):
+        # The menu must not offer a type the engine refuses, nor miss one it
+        # accepts.
+        from psditool import engine
+
+        self.assertEqual(sorted(shell_windows.IMAGE_EXTENSIONS_FOR_MENU),
+                         sorted(engine.IMAGE_EXTENSIONS))
+
+    def test_uninstall_clears_image_verbs_too(self):
+        shell_windows.install(shell_windows.SCOPE_USER)
+        shell_windows.uninstall()
+        leftovers = [p for (_r, p) in self.fake.keys if "PDFteleporterCompress" in p]
+        self.assertFalse(leftovers, leftovers)
