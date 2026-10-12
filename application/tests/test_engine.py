@@ -239,15 +239,97 @@ class TestImageEncoding(EngineTestCase):
 
 
 class TestProgressCallback(EngineTestCase):
-    def test_callback_is_called(self):
-        calls = []
-        engine.pdf_to_archive(self.report, quality="low",
-                              progress_cb=lambda *a: calls.append(a))
+    """The bar must move with the work, not sit at one step until the end.
+
+    Before these tests the rebuild reported 50 % before its page loop and
+    100 % after it, so a fifteen-second recomposition looked frozen. Every
+    conversion now reports on one fixed scale, monotonically, with
+    intermediate values during the long phase.
+    """
+
+    def _trace(self, run) -> list[tuple[int, int, str]]:
+        calls: list[tuple[int, int, str]] = []
+        # Disable the rate limit so every unit of work is observable.
+        saved = engine._PROGRESS_MIN_INTERVAL
+        engine._PROGRESS_MIN_INTERVAL = 0.0
+        try:
+            run(lambda *a: calls.append(a))
+        finally:
+            engine._PROGRESS_MIN_INTERVAL = saved
+        return calls
+
+    def _assert_well_formed(self, calls):
         self.assertTrue(calls)
         for step, total, message in calls:
             self.assertIsInstance(step, int)
             self.assertIsInstance(total, int)
             self.assertIsInstance(message, str)
+            self.assertEqual(total, engine.PROGRESS_SCALE,
+                             "the scale must not change mid-conversion")
+            self.assertTrue(0 <= step <= total)
+        steps = [step for step, _, _ in calls]
+        self.assertEqual(steps, sorted(steps), "progress went backwards")
+        self.assertEqual(calls[0][0], 0, "must start at zero")
+        self.assertEqual(calls[-1][0], engine.PROGRESS_SCALE,
+                         "must end at 100 %")
+
+    def test_compression_reports_intermediate_progress(self):
+        calls = self._trace(lambda cb: engine.pdf_to_archive(
+            self.report, quality="low", progress_cb=cb))
+        self._assert_well_formed(calls)
+        inner = {step for step, _, _ in calls if 0 < step < engine.PROGRESS_SCALE}
+        self.assertGreaterEqual(len(inner), 3,
+                                "no intermediate values: the bar would jump")
+        self.assertTrue(any("page" in m for _, _, m in calls),
+                        "per-page phase labels are missing")
+
+    def test_rebuild_reports_every_page_and_text_line(self):
+        data, _ = engine.pdf_to_archive(self.report, quality="low")
+        calls = self._trace(lambda cb: engine.archive_to_pdf(data, progress_cb=cb))
+        self._assert_well_formed(calls)
+
+        manifest = psdi.read_struct(data).manifest
+        pages = len(manifest["pages"])
+        lines = sum(len(block.get("l", []))
+                    for page in manifest["pages"]
+                    for block in page.get("tb", []))
+        text_reports = [m for _, _, m in calls if "texte" in m]
+        self.assertEqual(len(text_reports), lines,
+                         "one report per text line is what keeps the bar "
+                         "moving on a dense table page")
+        for n in range(1, pages + 1):
+            self.assertTrue(
+                any(f"page {n}/{pages}" in m for _, _, m in calls),
+                f"page {n} never reported",
+            )
+        # The long phase must not collapse into a single jump.
+        inner = {step for step, _, _ in calls if 0 < step < engine.PROGRESS_SCALE}
+        self.assertGreater(len(inner), pages)
+
+    def test_rebuild_of_page_images_reports_per_page(self):
+        data, _ = engine.pdf_to_archive(self.report, quality="low",
+                                        mode=engine.MODE_IMAGE)
+        calls = self._trace(lambda cb: engine.archive_to_pdf(data, progress_cb=cb))
+        self._assert_well_formed(calls)
+        pages = len(psdi.read_image(data).pages)
+        for n in range(1, pages + 1):
+            self.assertTrue(any(f"({n}/{pages})" in m for _, _, m in calls))
+
+    def test_updates_are_rate_limited(self):
+        # Hundreds of signals a second would flood the GUI thread. With the
+        # real interval, a conversion of a few seconds must stay well under
+        # one update per 50 ms on average; the labels still arrive.
+        import time as _time
+
+        calls: list[tuple[int, int, str]] = []
+        started = _time.monotonic()
+        engine.pdf_to_archive(self.report, quality="low",
+                              progress_cb=lambda *a: calls.append(a))
+        elapsed = _time.monotonic() - started
+        # Forced reports (phase starts, final) are a handful per conversion;
+        # anything beyond that is throttled.
+        allowed = elapsed / engine._PROGRESS_MIN_INTERVAL + 16
+        self.assertLessEqual(len(calls), allowed)
 
     def test_faulty_callback_does_not_abort_the_conversion(self):
         # A broken progress display must never cost the operator the archive.
@@ -261,6 +343,75 @@ class TestProgressCallback(EngineTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTextLayer(EngineTestCase):
+    """The per-page text layer must place text exactly where per-run
+    insert_htmlbox did.
+
+    The layer exists for speed -- insert_htmlbox is quadratic in the number
+    of runs on a page -- and is only acceptable if it changes nothing on the
+    page. The two paths are compared through the text the PDF reports, which
+    is exact and independent of the rasteriser.
+    """
+
+    def _words(self, pdf_bytes):
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            return [page.get_text("words") for page in doc]
+        finally:
+            doc.close()
+
+    def _rebuild_both_ways(self, data):
+        layered, _ = engine.archive_to_pdf(data)
+
+        original = engine._draw_line
+
+        def per_run(page, line, layer=None):
+            return original(page, line, None)
+
+        engine._draw_line = per_run
+        try:
+            direct, _ = engine.archive_to_pdf(data)
+        finally:
+            engine._draw_line = original
+        return layered, direct
+
+    def test_layer_places_text_exactly_like_insert_htmlbox(self):
+        for source in (self.report, self.table):
+            with self.subTest(source=os.path.basename(source)):
+                data, _ = engine.pdf_to_archive(source, quality="medium")
+                layered, direct = self._rebuild_both_ways(data)
+
+                pages_a, pages_b = self._words(layered), self._words(direct)
+                self.assertEqual(len(pages_a), len(pages_b))
+                compared = 0
+                for words_a, words_b in zip(pages_a, pages_b):
+                    self.assertEqual(len(words_a), len(words_b))
+                    for wa, wb in zip(words_a, words_b):
+                        self.assertEqual(wa[4], wb[4])
+                        for i in range(4):
+                            # Floating-point noise from composing the
+                            # matrices differently; a hundredth of a point
+                            # is far below anything a viewer can show.
+                            self.assertAlmostEqual(wa[i], wb[i], delta=0.01)
+                        compared += 1
+                self.assertGreater(compared, 50)
+
+    def test_layer_embeds_fonts_once_per_page(self):
+        # One form XObject per page instead of one per run: the object count
+        # no longer grows with the number of lines. This is what keeps the
+        # save fast and the file small.
+        data, _ = engine.pdf_to_archive(self.table, quality="medium")
+        layered, direct = self._rebuild_both_ways(data)
+        doc_a = fitz.open(stream=layered, filetype="pdf")
+        doc_b = fitz.open(stream=direct, filetype="pdf")
+        try:
+            self.assertLess(doc_a.xref_length() * 4, doc_b.xref_length())
+            self.assertLess(len(layered), len(direct))
+        finally:
+            doc_a.close()
+            doc_b.close()
 
 
 class TestVectorArtwork(unittest.TestCase):
@@ -650,3 +801,162 @@ class TestImageInput(unittest.TestCase):
         data, info = engine.pdf_to_archive(self.jpeg, quality="low",
                                            mode=engine.MODE_STRUCT)
         self.assertEqual(info["mode"], engine.MODE_IMAGE)
+
+
+class TestInteropSafeAdditions(unittest.TestCase):
+    """Placement-aware images, vector rules and links: all format-compatible."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.pdf = fixtures.rich_report(os.path.join(cls._tmp.name, "rich.pdf"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _manifest(self, quality="medium"):
+        data, _ = engine.pdf_to_archive(self.pdf, quality=quality)
+        return data, psdi.read_struct(data)
+
+    # --- placement-aware downscaling -------------------------------------
+    def test_image_is_not_stored_larger_than_its_placement(self):
+        import io
+
+        from PIL import Image
+
+        from psditool.presets import QUALITY_PRESETS
+
+        for quality in ("ultra_low", "medium"):
+            with self.subTest(quality=quality):
+                _, parsed = self._manifest(quality)
+                dpi = QUALITY_PRESETS[quality]["dpi"]
+                refs = [r for p in parsed.manifest["pages"] for r in p["ir"]]
+                self.assertTrue(refs)
+                for ref in refs:
+                    if int(ref["x"]) >= engine._ARTWORK_ID_TOP - 1000:
+                        continue  # artwork rasters are sized by region
+                    b = ref["b"]
+                    img = Image.open(io.BytesIO(parsed.images[ref["x"]]))
+                    need_w = (b[2] - b[0]) * dpi / 72 * 1.1 + 2
+                    need_h = (b[3] - b[1]) * dpi / 72 * 1.1 + 2
+                    self.assertLessEqual(img.width, need_w + 1,
+                                         f"{img.size} stored for {b} at {dpi} DPI")
+                    self.assertLessEqual(img.height, need_h + 1)
+
+    def test_image_is_never_upscaled(self):
+        # A tiny icon placed large must keep its original pixels, not grow.
+        import io
+
+        from PIL import Image
+
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=300)
+        icon = Image.new("RGB", (16, 16), (200, 30, 30))
+        buf = io.BytesIO(); icon.save(buf, format="PNG")
+        page.insert_image(fitz.Rect(20, 20, 120, 120), stream=buf.getvalue())
+        # Enough prose that mode detection keeps the structured path; a page
+        # that is mostly one image is legitimately treated as a scan.
+        for i in range(12):
+            page.insert_text(fitz.Point(20, 150 + i * 12),
+                             f"Ligne {i} de texte pour rester en mode structuré.",
+                             fontname="helv", fontsize=8)
+        path = os.path.join(self._tmp.name, "icon.pdf")
+        doc.save(path); doc.close()
+
+        data, _ = engine.pdf_to_archive(path, quality="high")
+        self.assertEqual(psdi.peek_version(data), psdi.ARCHIVE_VERSION_STRUCT)
+        parsed = psdi.read_struct(data)
+        for payload in parsed.images.values():
+            img = Image.open(io.BytesIO(payload))
+            self.assertLessEqual(max(img.size), 16)
+
+    def test_repeated_image_sized_for_its_largest_placement(self):
+        import io
+
+        from PIL import Image
+
+        doc = fitz.open()
+        img = Image.new("RGB", (400, 400), (30, 90, 200))
+        buf = io.BytesIO(); img.save(buf, format="JPEG")
+        # Same image: small on page 1, large on page 2.
+        # Each page is finished before the next is created: PyMuPDF page
+        # handles do not survive a later new_page() call.
+        for frame in (fitz.Rect(10, 10, 50, 50), fitz.Rect(10, 10, 210, 210)):
+            page = doc.new_page(width=400, height=600)
+            page.insert_image(frame, stream=buf.getvalue())
+            for i in range(14):
+                page.insert_text(fitz.Point(20, 260 + i * 14),
+                                 f"Ligne {i} de texte, mode structuré conservé.",
+                                 fontname="helv", fontsize=9)
+        path = os.path.join(self._tmp.name, "repeat.pdf")
+        doc.save(path); doc.close()
+
+        data, _ = engine.pdf_to_archive(path, quality="medium")
+        self.assertEqual(psdi.peek_version(data), psdi.ARCHIVE_VERSION_STRUCT)
+        parsed = psdi.read_struct(data)
+        self.assertEqual(len(parsed.images), 1, "extracted once")
+        stored = Image.open(io.BytesIO(next(iter(parsed.images.values()))))
+        # 200 pt at 120 DPI = 333 px (+10%), never upscaled beyond 400. Must
+        # be far larger than the 40 pt placement on page 1 would allow.
+        self.assertGreater(max(stored.size), 200)
+
+    # --- vector rules ------------------------------------------------------
+    def test_rules_are_stored_as_lines_not_rasters(self):
+        _, parsed = self._manifest()
+        page = parsed.manifest["pages"][0]
+        lines = [e for e in page["dr"] if e.get("t") == "line"]
+        self.assertGreaterEqual(len(lines), 2, "one horizontal, one vertical")
+        for entry in lines:
+            self.assertEqual(len(entry["r"]), 4)
+            self.assertIn("c", entry)
+        rasters = [k for k in parsed.images if int(k) >= engine._ARTWORK_ID_TOP - 1000]
+        self.assertFalse(rasters, "a plain rule must not become a raster")
+
+    def test_lines_rebuild_as_drawings(self):
+        data, _ = self._manifest()
+        target = os.path.join(self._tmp.name, "rich_rebuilt.pdf")
+        engine.archive_to_pdf(data, output_path=target)
+        doc = fitz.open(target)
+        try:
+            segs = [path for path in doc[0].get_drawings()
+                    if path.get("items") and all(it[0] == "l" for it in path["items"])]
+            self.assertGreaterEqual(len(segs), 2)
+        finally:
+            doc.close()
+
+    def test_a_chart_is_still_artwork(self):
+        # Only *pure* axis-aligned stroke paths are structure; a diagonal
+        # series or a curve must still be rasterised.
+        self.assertFalse(engine._path_is_artwork([("l", fitz.Point(0, 0), fitz.Point(100, 0))]))
+        self.assertTrue(engine._path_is_artwork([("l", fitz.Point(0, 0), fitz.Point(60, 40))]))
+
+    # --- hyperlinks ----------------------------------------------------------
+    def test_links_round_trip(self):
+        data, parsed = self._manifest()
+        links = [l for p in parsed.manifest["pages"] for l in p.get("lk", [])]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["u"], "https://example.org/fiche-reflexe")
+
+        target = os.path.join(self._tmp.name, "links_rebuilt.pdf")
+        engine.archive_to_pdf(data, output_path=target)
+        doc = fitz.open(target)
+        try:
+            uris = [l["uri"] for l in doc[0].get_links() if l.get("uri")]
+        finally:
+            doc.close()
+        self.assertEqual(uris, ["https://example.org/fiche-reflexe"])
+
+    # --- the one thing that matters: the original decoder still reads it ---
+    def test_legacy_decoder_steps_over_lines_and_links(self):
+        # The original walks "dr" with `if d['t'] != 'rect': continue` and
+        # never reads "lk". Reproduce that loop literally.
+        data, parsed = self._manifest()
+        drawn = 0
+        for page in parsed.manifest["pages"]:
+            for d in page.get("dr", []):
+                if not d["t"] == "rect":
+                    continue
+                fitz.Rect(d["r"])    # must be a valid rect for the original
+                drawn += 1
+        self.assertGreaterEqual(drawn, 1)

@@ -51,6 +51,8 @@ CASES = [
     ("table_12r", "tiny_table", {"quality": "medium"}),
     ("rotated", "rotated_report", {"quality": "low"}),
     ("mono", "monochrome_scan_like", {"quality": "low", "mode": "image"}),
+    ("rich", "rich_report", {"quality": "ultra_low"}),
+    ("rich", "rich_report", {"quality": "medium"}),
 ]
 
 

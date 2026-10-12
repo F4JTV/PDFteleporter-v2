@@ -198,3 +198,66 @@ def annotated_without_tounicode(path: str, ttf: str | None = None) -> str | None
     doc.save(path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
     doc.close()
     return path
+
+
+def rich_report(path: str) -> str:
+    """A page with every structured feature the encoder knows about.
+
+    One of each: a placed raster image drawn smaller than its pixel size (so
+    placement-aware downscaling has something to act on), a horizontal rule,
+    a vertical rule, a hyperlink, a filled table cell and prose. Built for
+    the golden vectors, whose earlier fixtures held text and rectangles only
+    and therefore could not notice a change to how images, lines or links
+    are encoded.
+    """
+    from PIL import Image, ImageDraw
+    import io
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+
+    page.insert_text(fitz.Point(50, 60), "Rapport illustré", fontname="hebo", fontsize=16)
+
+    # A 600x400 photo-like image placed in a 200x133 pt frame: 3x more
+    # pixels than the page shows.
+    img = Image.new("RGB", (600, 400))
+    draw = ImageDraw.Draw(img)
+    for i in range(0, 600, 20):
+        draw.rectangle([i, 0, i + 10, 400], fill=((i * 7) % 255, (i * 3) % 255, 120))
+    draw.ellipse([150, 80, 450, 320], fill=(240, 200, 60))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    page.insert_image(fitz.Rect(50, 80, 250, 213), stream=buf.getvalue())
+
+    # Rules: a title underline and a column divider.
+    shape = page.new_shape()
+    shape.draw_line(fitz.Point(50, 230), fitz.Point(545, 230))
+    shape.finish(color=(0.4, 0.4, 0.4), width=0.8)
+    shape.draw_line(fitz.Point(300, 250), fitz.Point(300, 500))
+    shape.finish(color=(0.6, 0.6, 0.6), width=0.5)
+    shape.commit()
+
+    # A filled cell with a border, as a table header.
+    shape = page.new_shape()
+    shape.draw_rect(fitz.Rect(50, 250, 290, 274))
+    shape.finish(color=(0.2, 0.3, 0.5), fill=(0.85, 0.9, 0.97), width=0.8)
+    shape.commit()
+    page.insert_text(fitz.Point(56, 267), "Moyens engagés", fontname="hebo", fontsize=10)
+
+    y = 300
+    for line in ("Situation stable sur le secteur nord.",
+                 "Liaison VARA HF établie avec la préfecture.",
+                 "Consulter la fiche réflexe en ligne."):
+        page.insert_text(fitz.Point(56, y), line, fontname="helv", fontsize=10)
+        y += 16
+
+    # A hyperlink over the last line.
+    page.insert_link({
+        "kind": fitz.LINK_URI,
+        "from": fitz.Rect(56, 320, 260, 334),
+        "uri": "https://example.org/fiche-reflexe",
+    })
+
+    doc.save(path, deflate=True)
+    doc.close()
+    return path

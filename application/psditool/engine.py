@@ -121,6 +121,75 @@ def _progress(cb: ProgressFn, step: int, total: int, message: str) -> None:
         log.debug("Progress callback raised", exc_info=True)
 
 
+# Progress is reported on a fixed scale so the bar never changes its maximum
+# mid-conversion, which made the percentage jump when a phase with a
+# different step count took over.
+PROGRESS_SCALE = 1000
+_PROGRESS_MIN_INTERVAL = 0.05  # seconds between two updates of one phase
+
+# Relative cost of each unit of work, measured on an eight-page bulletin. The
+# absolute values are irrelevant; only their ratios shape the bar. A text
+# line on rebuild is the reference: one Story layout, about a millisecond.
+_COST_REBUILD_LINE = 1.0
+# Page creation, rectangles, images, links, and grafting the page's text
+# layer: around 20 ms per page.
+_COST_REBUILD_PAGE = 20.0
+# Saving with garbage=4 deduplicates resources, so its cost follows the
+# object count, which follows the line count: a few percent of drawing.
+_COST_REBUILD_SAVE_PER_LINE = 0.05
+_COST_REBUILD_SAVE_PER_PAGE = 0.5  # page-image mode: one image per page
+_COST_COMPRESS_IMAGE = 1.0      # extract, mask, downscale, JPEG encode
+_COST_COMPRESS_PAGE = 5.0       # artwork regions, rawdict extraction
+_COST_COMPRESS_WRITE_PER_PAGE = 8.0  # LZMA at preset 9 over the manifest
+_COST_RENDER_PAGE = 5.0         # page-image mode: pixmap and JPEG encode
+_COST_RENDER_WRITE_PER_PAGE = 1.0
+
+
+class _Progress:
+    """Drive the progress callback from weighted units of work.
+
+    Reporting once per phase left the bar at 50 % for the whole of a rebuild,
+    which on a dense bulletin is fifteen seconds of apparent hang. Work is
+    counted in units weighted to track wall time -- one per text line on
+    rebuild, one per image and five per page on compression -- so the bar
+    advances with what is actually being done.
+
+    Updates are rate-limited to one every _PROGRESS_MIN_INTERVAL: a page of
+    three hundred table cells would otherwise queue hundreds of cross-thread
+    signals in a second. Phase changes and the final report always go
+    through, so no label is ever lost.
+    """
+
+    def __init__(self, cb: ProgressFn, total_units: float):
+        self._cb = cb
+        self._total = max(float(total_units), 1.0)
+        self._done = 0.0
+        self._last_time = 0.0
+
+    def advance(self, units: float, message: str, force: bool = False) -> None:
+        """Credit `units` of work and report, subject to rate limiting."""
+        self._done = min(self._done + units, self._total)
+        self._emit(message, force)
+
+    def phase(self, message: str) -> None:
+        """Report the start of a new phase, unconditionally."""
+        self._emit(message, force=True)
+
+    def finish(self, message: str) -> None:
+        self._done = self._total
+        self._emit(message, force=True)
+
+    def _emit(self, message: str, force: bool) -> None:
+        if self._cb is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_time < _PROGRESS_MIN_INTERVAL:
+            return
+        self._last_time = now
+        step = int(round(self._done / self._total * PROGRESS_SCALE))
+        _progress(self._cb, min(step, PROGRESS_SCALE), PROGRESS_SCALE, message)
+
+
 def _color_to_hex(color) -> str:
     if not color or not isinstance(color, (list, tuple)) or len(color) != 3:
         return ""
@@ -423,13 +492,22 @@ def _encode_jpeg(img: Image.Image, quality: int, allow_grayscale: bool = True) -
     return buf.getvalue()
 
 
-def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict):
+def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict,
+                    placed_pt: tuple[float, float] | None = None):
     """Downscale and re-encode one extracted image.
 
-    The size ceiling depends on what the image appears to be: a large square
-    is treated as a map and given more room, a long thin strip is a letterhead
-    banner and is capped by height, and a small icon is shrunk hard because it
-    contributes nothing at radio bandwidth.
+    Two ceilings apply and the smaller wins. The first depends on what the
+    image appears to be: a large square is treated as a map and given more
+    room, a long thin strip is a letterhead banner and is capped by height,
+    and a small icon is shrunk hard because it contributes nothing at radio
+    bandwidth.
+
+    The second is the size the page actually shows it at. A 762x572 photo
+    placed in a 249x187 pt frame needs 249x187 pixels at 72 DPI, not 400x300:
+    everything beyond that is decoded, transmitted and discarded by the
+    viewer. On a document heavy with photographs this is the largest single
+    saving available, and it costs nothing visible because the pixels dropped
+    were never displayed.
     """
     try:
         img = Image.open(io.BytesIO(img_bytes))
@@ -459,6 +537,19 @@ def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict):
         if max(img.size) > max_dim:
             img.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
+    if placed_pt is not None:
+        # Pixels needed to fill the placement at the preset's resolution. A
+        # small margin covers viewers that upsample slightly when zoomed, and
+        # the image is never enlarged: upscaling adds bytes, not detail.
+        dpi = params["dpi"]
+        need_w = int(round(placed_pt[0] * dpi / 72 * 1.1))
+        need_h = int(round(placed_pt[1] * dpi / 72 * 1.1))
+        if need_w > 0 and need_h > 0 and (img.width > need_w or img.height > need_h):
+            scale = min(need_w / img.width, need_h / img.height, 1.0)
+            target = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
+            if target != img.size:
+                img = img.resize(target, Image.LANCZOS)
+
     return _encode_jpeg(img, params["jpeg_quality"]), width, height
 
 
@@ -469,6 +560,36 @@ def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict):
 _ARTWORK_ID_TOP = 65500
 _ARTWORK_MIN_SIDE = 24.0
 _ARTWORK_MAX_PAGE_FRACTION = 0.55
+
+
+def _axis_lines_from_path_items(items, tolerance: float = 0.6) -> list:
+    """Return the axis-aligned segments of a path as (x0, y0, x1, y1).
+
+    A single horizontal rule under a title, the border of a table drawn as
+    separate strokes, a divider between sections: all of these are one
+    straight segment, which is not a rectangle and so used to be classified
+    as artwork and rasterised into a JPEG tile. A 340 pt rule became a
+    340x109 pt picture weighing three kilobytes, for something a dozen bytes
+    describe exactly.
+    """
+    lines = []
+    for item in items:
+        if item[0] != "l":
+            continue
+        x0, y0 = item[1].x, item[1].y
+        x1, y1 = item[2].x, item[2].y
+        horizontal = abs(y1 - y0) <= tolerance and abs(x1 - x0) > tolerance
+        vertical = abs(x1 - x0) <= tolerance and abs(y1 - y0) > tolerance
+        if horizontal or vertical:
+            lines.append((x0, y0, x1, y1))
+    return lines
+
+
+def _path_is_only_axis_lines(items) -> bool:
+    """A path made solely of horizontal and vertical strokes is structure."""
+    if not items or any(item[0] != "l" for item in items):
+        return False
+    return len(_axis_lines_from_path_items(items)) == len(items)
 
 
 def _path_is_artwork(items) -> bool:
@@ -484,6 +605,9 @@ def _path_is_artwork(items) -> bool:
         return False
     if any(item[0] == "c" for item in items):
         return True
+    # Pure horizontal/vertical strokes are rules and borders, never a chart.
+    if _path_is_only_axis_lines(items):
+        return False
     for item in items:
         if item[0] != "qu":
             continue
@@ -886,7 +1010,7 @@ def _extract_page(page, page_idx: int, images_data: dict,
             {"x": str(xref), "b": _quantize_box(bbox, precision)}
         )
 
-    # --- vector rectangles ------------------------------------------------
+    # --- vector rectangles and rules -----------------------------------------
     page_area = abs(page.rect.width * page.rect.height) or 1.0
     for path in page.get_drawings():
         fill = path.get("fill")
@@ -895,7 +1019,29 @@ def _extract_page(page, page_idx: int, images_data: dict,
             continue
 
         width = path.get("width", 0) or 0
-        for rect in _rects_from_path_items(path.get("items", [])):
+        items = path.get("items", [])
+
+        # Straight rules first: a path that is only axis-aligned strokes is
+        # emitted as "line" entries. Stored in the same "dr" list as the
+        # rectangles, with a different "t", because the original decoder
+        # walks that list with `if d['t'] != 'rect': continue` -- it steps
+        # over these cleanly instead of failing on an unknown page key.
+        if color is not None and _path_is_only_axis_lines(items):
+            for x0, y0, x1, y1 in _axis_lines_from_path_items(items):
+                seg = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+                if _covered(seg + (-1, -1, 1, 1), artwork):
+                    continue
+                entry = {
+                    "t": "line",
+                    "r": _quantize_box((x0, y0, x1, y1), precision),
+                    "c": _color_to_hex(color),
+                }
+                if width > 0.1:
+                    entry["w"] = round(width, 1)
+                page_data["dr"].append(entry)
+            continue
+
+        for rect in _rects_from_path_items(items):
             rect = fitz.Rect(rect).normalize()
             if rect.is_empty or rect.is_infinite:
                 continue
@@ -919,6 +1065,23 @@ def _extract_page(page, page_idx: int, images_data: dict,
             if width > 0.1:
                 entry["w"] = round(width, 1)
             page_data["dr"].append(entry)
+
+    # --- hyperlinks ---------------------------------------------------------
+    # Stored under a page key the original decoder never reads, so it is
+    # invisible to older stations and costs a few dozen bytes per link here.
+    # Only external URIs are kept: an internal page jump needs the document's
+    # own structure to resolve, which the rebuild does not reproduce.
+    for link in page.get_links():
+        uri = link.get("uri")
+        if not uri or link.get("kind") != fitz.LINK_URI:
+            continue
+        box = link.get("from")
+        if box is None or box.is_empty:
+            continue
+        page_data.setdefault("lk", []).append({
+            "b": _quantize_box(box, precision),
+            "u": uri,
+        })
 
     # --- ticked form checkboxes -------------------------------------------
     # The tick lives in the widget's /AP /N appearance stream, which neither
@@ -966,36 +1129,66 @@ def _render_region(page, region, params: dict) -> bytes | None:
         return None
 
 
+def _extract_placed_image(doc, xref: int, params: dict,
+                          placed_pt: tuple[float, float]):
+    """Extract one image object and encode it for the archive.
+
+    Returns (payload, width, height), or None when the object cannot be
+    read or yields nothing worth storing -- in which case the page simply
+    has no image reference for it, as before.
+    """
+    try:
+        raw = doc.extract_image(xref)
+    except Exception:  # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    pixels = _image_bytes_with_mask(doc, xref, raw)
+    if not pixels:
+        return None
+    return _optimize_image(pixels, raw["width"], raw["height"], params,
+                           placed_pt=placed_pt)
+
+
 def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
                      skip_images: bool) -> bytes:
     doc = fitz.open(pdf_path)
     try:
         images_data: dict[str, bytes] = {}
         image_meta: dict[str, dict] = {}
+        page_count = doc.page_count
 
+        # First pass: the largest frame each image is drawn into, across
+        # every page. A logo repeated on eight pages is extracted once and
+        # must be sized for its biggest appearance, not its first. Done
+        # before any progress is reported so the image count is known and
+        # the bar's scale can be fixed for the whole conversion.
+        largest_pt: dict[int, tuple[float, float]] = {}
         if not skip_images:
-            _progress(progress_cb, 1, 3, "Extraction des images…")
-            seen_xrefs: set[int] = set()
             for page in doc:
                 for info in page.get_image_info(xrefs=True):
                     xref = info.get("xref", 0)
-                    if not xref or xref in seen_xrefs:
+                    if not xref:
                         continue
-                    seen_xrefs.add(xref)
-                    try:
-                        raw = doc.extract_image(xref)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if not raw:
-                        continue
-                    pixels = _image_bytes_with_mask(doc, xref, raw)
-                    if not pixels:
-                        continue
-                    optimized = _optimize_image(
-                        pixels, raw["width"], raw["height"], params
-                    )
-                    if not optimized:
-                        continue
+                    b = info.get("bbox", (0, 0, 0, 0))
+                    w_pt, h_pt = abs(b[2] - b[0]), abs(b[3] - b[1])
+                    prev = largest_pt.get(xref)
+                    if prev is None or w_pt * h_pt > prev[0] * prev[1]:
+                        largest_pt[xref] = (w_pt, h_pt)
+
+        progress = _Progress(
+            progress_cb,
+            len(largest_pt) * _COST_COMPRESS_IMAGE
+            + page_count * (_COST_COMPRESS_PAGE + _COST_COMPRESS_WRITE_PER_PAGE),
+        )
+
+        if largest_pt:
+            image_total = len(largest_pt)
+            progress.phase(f"Extraction des images (0/{image_total})…")
+            for n, xref in enumerate(sorted(largest_pt), start=1):
+                optimized = _extract_placed_image(doc, xref, params,
+                                                  largest_pt[xref])
+                if optimized is not None:
                     payload, orig_w, orig_h = optimized
                     images_data[str(xref)] = payload
                     image_meta[str(xref)] = {
@@ -1003,8 +1196,10 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
                         "h": orig_h,
                         "s": len(payload),
                     }
+                progress.advance(_COST_COMPRESS_IMAGE,
+                                 f"Extraction des images ({n}/{image_total})…")
 
-        _progress(progress_cb, 2, 3, "Construction du manifeste…")
+        progress.phase(f"Analyse des pages (0/{page_count})…")
         manifest = {
             "v": "1.0.6",
             "src": os.path.basename(pdf_path),
@@ -1054,8 +1249,13 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
             manifest["page_sizes"].append(
                 {"w": page.rect.width, "h": page.rect.height}
             )
+            progress.advance(_COST_COMPRESS_PAGE,
+                             f"Analyse des pages ({page_idx + 1}/{page_count})…")
 
-        return psdi.write_struct(manifest, images_data, params["lzma_preset"])
+        progress.phase("Compression LZMA de l'archive…")
+        data = psdi.write_struct(manifest, images_data, params["lzma_preset"])
+        progress.finish("Archive construite")
+        return data
     finally:
         doc.close()
 
@@ -1066,17 +1266,25 @@ def _compress_image(pdf_path: str, params: dict, progress_cb: ProgressFn) -> byt
         dpi = params["dpi"]
         matrix = fitz.Matrix(dpi / 72, dpi / 72)
         total = doc.page_count
+        progress = _Progress(
+            progress_cb,
+            total * (_COST_RENDER_PAGE + _COST_RENDER_WRITE_PER_PAGE),
+        )
 
         pages: list[tuple[float, float, bytes]] = []
+        progress.phase(f"Rendu des pages à {dpi} ppp (0/{total})…")
         for i, page in enumerate(doc):
-            _progress(progress_cb, i + 1, total + 1,
-                      f"Rendu de la page {i + 1}/{total} ({dpi} ppp)…")
             pix = page.get_pixmap(matrix=matrix)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             pages.append((page.rect.width, page.rect.height,
                           _encode_jpeg(img, params["jpeg_quality"])))
+            progress.advance(_COST_RENDER_PAGE,
+                             f"Rendu des pages à {dpi} ppp ({i + 1}/{total})…")
 
-        return psdi.write_image(pages, params["lzma_preset"])
+        progress.phase("Écriture de l'archive…")
+        data = psdi.write_image(pages, params["lzma_preset"])
+        progress.finish("Archive construite")
+        return data
     finally:
         doc.close()
 
@@ -1163,10 +1371,12 @@ def _compress_image_file(path: str, params: dict, progress_cb: ProgressFn) -> by
     dpi = params["dpi"]
     pages: list[tuple[float, float, bytes]] = []
     total = len(frames)
+    progress = _Progress(
+        progress_cb, total * (_COST_RENDER_PAGE + _COST_RENDER_WRITE_PER_PAGE),
+    )
 
+    progress.phase(f"Préparation des images à {dpi} ppp (0/{total})…")
     for i, frame in enumerate(frames):
-        _progress(progress_cb, i + 1, total + 1,
-                  f"Préparation de l'image {i + 1}/{total} ({dpi} ppp)…")
         width_pt, height_pt = _page_size_for(*frame.size)
         target = (max(1, int(round(width_pt * dpi / 72))),
                   max(1, int(round(height_pt * dpi / 72))))
@@ -1174,8 +1384,13 @@ def _compress_image_file(path: str, params: dict, progress_cb: ProgressFn) -> by
             frame = frame.resize(target, Image.LANCZOS)
         pages.append((width_pt, height_pt,
                       _encode_jpeg(frame, params["jpeg_quality"])))
+        progress.advance(_COST_RENDER_PAGE,
+                         f"Préparation des images à {dpi} ppp ({i + 1}/{total})…")
 
-    return psdi.write_image(pages, params["lzma_preset"])
+    progress.phase("Écriture de l'archive…")
+    data = psdi.write_image(pages, params["lzma_preset"])
+    progress.finish("Archive construite")
+    return data
 
 
 def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
@@ -1201,6 +1416,11 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
     original_size = os.path.getsize(pdf_path)
     started = time.time()
 
+    # Mode detection reads every page before any phase can report, so the
+    # bar gets a label straight away rather than staying blank for it.
+    _progress(progress_cb, 0, PROGRESS_SCALE,
+              f"Analyse du document ({original_size // 1024} ko)…")
+
     auto_switch_reason = None
     if is_image_file(pdf_path):
         # Not a PDF at all: a photo or scan. Only the page-image encoding
@@ -1218,8 +1438,6 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
             log.info("Auto-switch struct -> image (reason: %s)", reason)
             mode = detected
 
-    _progress(progress_cb, 0, 3, f"Ouverture du PDF ({original_size // 1024} ko)…")
-
     if is_image_file(pdf_path):
         archive_bytes = _compress_image_file(pdf_path, params, progress_cb)
     elif mode == MODE_IMAGE:
@@ -1227,7 +1445,7 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
     else:
         archive_bytes = _compress_struct(pdf_path, params, progress_cb, skip_images)
 
-    _progress(progress_cb, 3, 3, "Compression terminée")
+    _progress(progress_cb, PROGRESS_SCALE, PROGRESS_SCALE, "Compression terminée")
     elapsed = time.time() - started
 
     if output_path:
@@ -1258,43 +1476,95 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes
     manifest = parsed.manifest
     images = parsed.images
 
-    _progress(progress_cb, 1, 2, "Recomposition des pages…")
+    # Text lines are the unit of work: each one is laid out through a Story
+    # and a temporary document, which is where nearly all the time goes. A
+    # dense table page can hold three hundred of them against a dozen on a
+    # cover page, so counting pages alone would still leave the bar sitting
+    # still for seconds.
+    page_total = len(manifest["pages"])
+    line_counts = [
+        sum(len(block.get("l", [])) for block in page_data.get("tb", []))
+        for page_data in manifest["pages"]
+    ]
+    progress = _Progress(
+        progress_cb,
+        sum(line_counts) * (_COST_REBUILD_LINE + _COST_REBUILD_SAVE_PER_LINE)
+        + page_total * _COST_REBUILD_PAGE,
+    )
 
     doc = fitz.open()
     try:
-        for page_data in manifest["pages"]:
+        for page_no, page_data in enumerate(manifest["pages"], start=1):
             page_idx = page_data["pn"] - 1
             size = manifest["page_sizes"][page_idx]
             page = doc.new_page(width=size["w"], height=size["h"])
+            label = f"Recomposition de la page {page_no}/{page_total}"
+            progress.phase(f"{label}…")
 
             # Rectangles first: they are backgrounds and cell fills, and must
             # sit under everything else.
             shape = page.new_shape()
             for entry in page_data.get("dr", []):
-                if entry.get("t") != "rect":
-                    continue
-                line_width = entry.get("w", 0)
-                shape.draw_rect(fitz.Rect(entry["r"]))
-                shape.finish(
-                    color=_hex_to_rgb(entry.get("c", "")),
-                    fill=_hex_to_rgb(entry.get("f", "")),
-                    width=line_width if line_width > 0.1 else 0,
-                )
+                kind = entry.get("t")
+                if kind == "rect":
+                    line_width = entry.get("w", 0)
+                    shape.draw_rect(fitz.Rect(entry["r"]))
+                    shape.finish(
+                        color=_hex_to_rgb(entry.get("c", "")),
+                        fill=_hex_to_rgb(entry.get("f", "")),
+                        width=line_width if line_width > 0.1 else 0,
+                    )
+                elif kind == "line":
+                    x0, y0, x1, y1 = entry["r"]
+                    shape.draw_line(fitz.Point(x0, y0), fitz.Point(x1, y1))
+                    shape.finish(
+                        color=_hex_to_rgb(entry.get("c", "")) or (0, 0, 0),
+                        width=max(entry.get("w", 0.5), 0.3),
+                    )
             shape.commit()
 
             for ref in page_data.get("ir", []):
                 payload = images.get(ref["x"])
                 if payload:
                     page.insert_image(fitz.Rect(ref["b"]), stream=payload)
+            progress.advance(_COST_REBUILD_PAGE, f"{label}…")
 
+            line_total = line_counts[page_no - 1]
+            drawn = 0
+            layer = _TextLayer(page.rect)
             for block in page_data.get("tb", []):
                 for line in block.get("l", []):
-                    _draw_line(page, line)
+                    _draw_line(page, line, layer)
+                    drawn += 1
+                    progress.advance(
+                        _COST_REBUILD_LINE,
+                        f"{label} — texte {drawn}/{line_total}…",
+                    )
+            layer.commit(page)
 
             _draw_checkmarks(page, page_data.get("ck", []))
 
+            for link in page_data.get("lk", []):
+                try:
+                    page.insert_link({
+                        "kind": fitz.LINK_URI,
+                        "from": fitz.Rect(link["b"]),
+                        "uri": link["u"],
+                    })
+                except Exception:  # noqa: BLE001
+                    log.debug("Could not restore link %r", link.get("u"),
+                              exc_info=True)
+
+        progress.phase("Enregistrement du PDF…")
         buf = io.BytesIO()
-        doc.save(buf, deflate=True, deflate_images=True, garbage=4, clean=True)
+        # garbage=4 merges duplicate resources: each page's text layer is a
+        # form XObject with its own copy of the fonts, and without level 4
+        # the file is several times larger. clean=True is deliberately
+        # absent: it re-serialises every content stream for a file that
+        # renders pixel for pixel the same, and this file never goes on the
+        # air, so its size is of no consequence; the wait was.
+        doc.save(buf, deflate=True, deflate_images=True, garbage=4)
+        progress.finish("PDF enregistré")
     finally:
         doc.close()
 
@@ -1307,7 +1577,68 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes
     return buf.getvalue(), info
 
 
-def _draw_line(page, line: dict) -> None:
+class _TextLayer:
+    """Every text run of one page, laid out into a single form XObject.
+
+    `Page.insert_htmlbox` builds a one-page document per run and grafts it
+    onto the page with `show_pdf_page`, which first lists every XObject,
+    image and font already on the page to pick an unused resource name. That
+    listing grows with each run, so a page costs time quadratic in its line
+    count: on a 294-line table page the last runs took 44 ms each against
+    8 ms for the first, and that page alone took seven seconds.
+
+    Here each run goes through the same Story layout and the same
+    fit-to-box shrinking as insert_htmlbox -- the arithmetic is copied from
+    it, so the glyphs land on the same pixels -- but is drawn into one
+    DocumentWriter page the size of the target page, grafted once at the
+    end. The rebuilt bulletin went from 15.5 s to under 3 s, and the saved
+    PDF shrank, since the fonts are embedded once per page rather than once
+    per run.
+    """
+
+    _BODY_MARGIN_CSS = "body {margin:1px;}"  # what insert_htmlbox prepends
+
+    def __init__(self, page_rect):
+        self._stream = io.BytesIO()
+        self._writer = fitz.DocumentWriter(self._stream)
+        self._device = self._writer.begin_page(
+            fitz.Rect(0, 0, page_rect.width, page_rect.height)
+        )
+        self._runs = 0
+
+    def add(self, rect, html: str, css: str, scale_low: float) -> bool:
+        """Lay out one run inside `rect`; False when it fits at no scale."""
+        story = fitz.Story(html=html, user_css=self._BODY_MARGIN_CSS + css)
+        # insert_htmlbox fits by asking how much *larger* the box must grow
+        # to hold the text, then draws the result shrunk by the inverse.
+        temp_rect = fitz.Rect(0, 0, rect.width, rect.height)
+        fit = story.fit_scale(
+            temp_rect, scale_min=1, scale_max=1 / scale_low,
+            flags=fitz.mupdf.FZ_PLACE_STORY_FLAG_NO_OVERFLOW,
+        )
+        if not fit.big_enough:
+            return False
+        scale = 1 / fit.parameter
+        story.place(fit.rect)
+        story.draw(self._device,
+                   fitz.Matrix(scale, 0, 0, scale, rect.x0, rect.y0))
+        self._runs += 1
+        return True
+
+    def commit(self, page) -> None:
+        """Graft the layer onto `page`, above whatever is already drawn."""
+        self._writer.end_page()
+        self._writer.close()
+        if not self._runs:
+            return
+        source = fitz.open(stream=self._stream.getvalue(), filetype="pdf")
+        try:
+            page.show_pdf_page(page.rect, source, 0)
+        finally:
+            source.close()
+
+
+def _draw_line(page, line: dict, layer: _TextLayer | None = None) -> None:
     """Render one line of text, preserving the columns it was laid out in.
 
     Spans are grouped by position rather than simply concatenated. A line may
@@ -1316,6 +1647,10 @@ def _draw_line(page, line: dict) -> None:
     edge. Spans that genuinely run on -- a bold word inside a sentence -- have
     no gap between them and stay in the same box, so inline styling still
     works.
+
+    With a `layer`, runs are collected there and drawn in one go when the
+    layer is committed; without one they are placed on the page directly,
+    one insert_htmlbox each, which is the slow path kept for comparison.
     """
     spans = [span for span in line.get("s", []) if span.get("t")]
     if not spans:
@@ -1344,10 +1679,11 @@ def _draw_line(page, line: dict) -> None:
             min(b[0] for b in boxes), line_box[1],
             max(b[2] for b in boxes), line_box[3],
         ]
-        _draw_cluster(page, cluster, cluster_box)
+        _draw_cluster(page, cluster, cluster_box, layer)
 
 
-def _draw_cluster(page, spans: list, bbox) -> None:
+def _draw_cluster(page, spans: list, bbox,
+                  layer: _TextLayer | None = None) -> None:
     """Render one run of adjacent spans inside a single box.
 
     insert_htmlbox is used rather than insert_text because it handles mixed
@@ -1396,8 +1732,18 @@ def _draw_cluster(page, spans: list, bbox) -> None:
     rect = fitz.Rect(bbox[0] - 0.5, bbox[1], bbox[2] + 0.5, bbox[1] + height)
 
     try:
-        page.insert_htmlbox(rect, "".join(parts), css=_HTML_BASE_CSS,
-                            scale_low=0.5)
+        if layer is not None:
+            fitted = layer.add(rect, "".join(parts), _HTML_BASE_CSS,
+                               scale_low=0.5)
+        else:
+            fitted = page.insert_htmlbox(rect, "".join(parts),
+                                         css=_HTML_BASE_CSS,
+                                         scale_low=0.5)[0] >= 0
+        if not fitted:
+            # Both paths draw nothing when the text will not fit even at
+            # half size; the original behaved the same, silently. Say so.
+            log.debug("Run does not fit its box at half size, dropped: %r",
+                      "".join(s.get("t", "") for s in spans)[:60])
     except Exception:  # noqa: BLE001
         # Fall back to plain text placement rather than dropping the line.
         for span in spans:
@@ -1452,17 +1798,24 @@ def _draw_checkmarks(page, checks: list) -> None:
 def _rebuild_image(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes, dict]:
     parsed = psdi.read_image(archive_data)
     total = len(parsed.pages)
+    progress = _Progress(
+        progress_cb,
+        total * (_COST_REBUILD_PAGE + _COST_REBUILD_SAVE_PER_PAGE),
+    )
 
     doc = fitz.open()
     try:
+        progress.phase(f"Recomposition des pages (0/{total})…")
         for i, (width, height, jpeg) in enumerate(parsed.pages):
-            _progress(progress_cb, i + 1, total + 1,
-                      f"Recomposition de la page {i + 1}/{total}…")
             page = doc.new_page(width=width, height=height)
             page.insert_image(page.rect, stream=jpeg)
+            progress.advance(_COST_REBUILD_PAGE,
+                             f"Recomposition des pages ({i + 1}/{total})…")
 
+        progress.phase("Enregistrement du PDF…")
         buf = io.BytesIO()
-        doc.save(buf, deflate=True, garbage=4, clean=True)
+        doc.save(buf, deflate=True, garbage=4)
+        progress.finish("PDF enregistré")
     finally:
         doc.close()
 
@@ -1478,6 +1831,8 @@ def archive_to_pdf(archive_data: bytes, output_path: str | None = None,
     has to interpret a struct or LZMA error from the parsing layer.
     """
     version = psdi.peek_version(archive_data)
+    _progress(progress_cb, 0, PROGRESS_SCALE,
+              f"Lecture de l'archive ({len(archive_data) // 1024} ko)…")
 
     if version == psdi.ARCHIVE_VERSION_STRUCT:
         pdf_bytes, info = _rebuild_struct(archive_data, progress_cb)
@@ -1486,7 +1841,7 @@ def archive_to_pdf(archive_data: bytes, output_path: str | None = None,
     else:
         raise psdi.PsdiError(f"Unsupported archive version: {version}")
 
-    _progress(progress_cb, 2, 2, "Recomposition terminée")
+    _progress(progress_cb, PROGRESS_SCALE, PROGRESS_SCALE, "Recomposition terminée")
 
     if output_path:
         with open(output_path, "wb") as handle:

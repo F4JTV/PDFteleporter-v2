@@ -302,6 +302,81 @@ recompressées en LZMA quand cela les gonfle, le drapeau enregistrant le choix ;
 et les images sont triées numériquement à l'écriture, si bien que deux
 compressions du même document produisent des archives identiques au bit près.
 
+### Images, filets et liens : −22 % à `ultra_low` (version 2.2.0)
+
+Sur un document chargé de photographies, c'est l'encodage des **images** qui
+domine, pas le texte. Un SITREP de huit pages avec logos et graphiques pesait
+66 091 octets à `ultra_low` ; trois ajouts le ramènent à 49 500.
+
+| Changement | Effet sur le SITREP |
+|---|---|
+| Images réduites à leur taille **affichée** plutôt qu'à leur taille native | −22 % à `ultra_low`, −18 % à `medium` |
+| Filets et bordures encodés en traits vectoriels (`line`) au lieu d'être rastérisés | −5 % supplémentaires |
+| Liens hypertexte conservés (`lk`) | +169 octets pour 13 liens |
+
+**Images à leur taille affichée.** Un logo de 1 200 px placé dans une case de
+40 pt était réduit par le préréglage de résolution, mais à partir de ses pixels
+natifs : à 72 dpi il restait trop grand pour ce que la page en montre. Le moteur
+relève désormais la plus grande boîte d'affichage de chaque image sur l'ensemble
+du document (une image partagée entre pages est optimisée pour son plus grand
+usage) et plafonne la réduction à cette taille, avec 10 % de marge. Les pixels
+supprimés n'auraient jamais été visibles.
+
+**Traits vectoriels.** Un tracé fait uniquement de segments horizontaux ou
+verticaux (lignes de tableau, soulignés, règles de section) n'est plus traité
+comme une illustration à rastériser : chaque segment devient une entrée
+`{"t": "line", "r": [x0, y0, x1, y1], "c": couleur, "w": épaisseur}` dans la
+liste `dr` de la page. Quelques octets au lieu d'une image.
+
+**Liens.** Les annotations `/URI` de chaque page sont relevées dans une liste
+`lk` et réinsérées à la recomposition. Un bulletin qui renvoie vers un site de
+l'OMS ou une carte en ligne garde ses liens cliquables après transit radio.
+
+**Pourquoi ces ajouts ne cassent rien.** Le format `.psdi` n'a pas changé :
+même signature, même version 1, mêmes structures. Le décodeur d'origine parcourt
+`dr` avec `if not d['t'] == 'rect': continue`, il saute donc les traits ; il
+n'a jamais lu de clé `lk`, il l'ignore. Un port fidèle de sa boucle de
+recomposition a été exécuté sur les nouvelles archives : huit pages, 2 513 mots,
+aucune exception. La réduction d'image, elle, ne touche que la charge JPEG, que
+tout décodeur affiche telle quelle.
+
+Les vecteurs de référence ont été étendus d'une fixture `rich_report`
+(photographies, tableau à filets, liens) sur deux préréglages. Désactiver le
+plafond d'affichage les fait échouer — c'est leur rôle.
+
+### Recomposition : 16 s → 0,9 s, et une barre qui avance (version 2.2.1)
+
+Le symptôme était une barre de progression figée à 50 % pendant toute la
+recomposition, puis 100 % d'un coup. La cause immédiate : le moteur ne
+signalait que deux étapes, avant et après la boucle des pages. La cause de
+fond, trouvée en mesurant : la recomposition d'un bulletin de huit pages
+prenait 16 secondes, dont 7 pour la seule page du tableau paludisme.
+
+**Pourquoi 16 secondes.** Chaque fragment de texte était posé par
+`insert_htmlbox`, qui construit un document temporaire d'une page et le
+greffe sur la page cible via `show_pdf_page`. Cette greffe commence par lister
+toutes les ressources déjà présentes sur la page pour choisir un nom libre ;
+la liste s'allonge à chaque fragment, et le coût par fragment avec elle —
+7,8 ms pour les cinquante premiers d'une page, 44 ms pour les cinquante
+derniers. Une page de 294 lignes coûtait donc le carré de sa longueur.
+
+**Le correctif.** Les fragments d'une page sont désormais mis en page par la
+même machinerie `Story`, avec le même ajustement à la cellule, mais dessinés
+dans une seule page `DocumentWriter` de la taille de la page cible, greffée
+une fois à la fin. L'arithmétique est copiée d'`insert_htmlbox`, et
+l'équivalence est vérifiée par un test qui recompose par les deux chemins et
+compare les mots que le PDF rapporte : même texte, mêmes positions à 0,002 pt
+près sur 2 508 mots. Le PDF local passe au passage de 943 ko à 537 ko, les
+polices étant embarquées une fois par page au lieu d'une fois par fragment.
+
+**La barre.** Le moteur rapporte sur une échelle fixe (`PROGRESS_SCALE`),
+par unités de travail pondérées : une par ligne de texte à la recomposition,
+une par image et cinq par page à la compression, l'enregistrement LZMA
+compté selon le nombre de pages. Les mises à jour sont limitées à une toutes
+les 50 ms, les changements de phase passant toujours. Mesuré sur le même
+bulletin : à la moitié du temps, la barre est à 37–46 % ; aucun intervalle
+immobile ne dépasse 60 ms.
+
 ### Correctifs
 
 **Rotation ignorée en mode texte seul.** L'original désactivait entièrement la
@@ -474,6 +549,20 @@ petite des deux.
 
 **Cette disposition ne doit pas être modifiée.** Réordonner ou redimensionner un
 champ rompt l'interopérabilité avec les stations en service.
+
+Le manifeste JSON est lui aussi un contrat. Les clés que cette version écrit en
+plus de la spécification d'origine sont toutes *optionnelles* et ignorées par un
+décodeur qui ne les connaît pas :
+
+| Clé | Où | Contenu | Comportement du décodeur d'origine |
+|---|---|---|---|
+| `{"t": "line", …}` | entrée de `dr` | trait horizontal ou vertical | sauté par `if not d['t'] == 'rect'` |
+| `lk` | page | liste `[{"b": boîte, "u": uri}]` | jamais lue |
+
+Ajouter une clé à ce tableau n'est acceptable qu'à cette même condition : le
+décodeur d'origine doit l'ignorer sans erreur, ce que le test
+`TestInteropSafeAdditions` vérifie en exécutant un port fidèle de sa boucle de
+recomposition.
 
 ---
 

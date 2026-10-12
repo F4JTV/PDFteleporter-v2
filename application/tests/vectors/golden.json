@@ -29,6 +29,14 @@
    "sha256": "4cdfd6b552f39b89097a2c417a932736439ebb54fe673e79d4643f692f59172e",
    "size": 2093
   },
+  "rich|quality=medium": {
+   "sha256": "01c4760cb5172c90a7c2a33c66328e5f85779de70243dbd3f50a3113ee4be91b",
+   "size": 6081
+  },
+  "rich|quality=ultra_low": {
+   "sha256": "25833240b450ba3c0b16d48edbdac4f468f5f8dc78dbb4d9ff56fe2ad0dd3b58",
+   "size": 2914
+  },
   "rotated|quality=low": {
    "sha256": "f70ab669d0db0da0d9474f9030883deef6886320e669a8cad765d88b8ea96822",
    "size": 59665
