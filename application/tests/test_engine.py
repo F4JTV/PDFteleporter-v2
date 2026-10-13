@@ -519,6 +519,135 @@ class TestVectorArtwork(unittest.TestCase):
         for ref in refs:
             self.assertIn(ref["x"], parsed.images)
 
+    # --- text converted to outlines ------------------------------------
+    # Excel writes chart axis labels as one curve-only path per word. Each
+    # word is smaller than the artwork floor and the words sit a word gap
+    # apart, so without the run detection the whole axis vanished.
+
+    @staticmethod
+    def _outline_word(shape, x: float, y: float, loops: int, size: float = 9.0):
+        """Draw a glyph-like blob chain: `loops` closed bezier loops in a row,
+        all inside one path, the way an outlined word is a single path."""
+        step = size * 0.8
+        for i in range(loops):
+            cx = x + i * step
+            shape.draw_bezier(fitz.Point(cx, y), fitz.Point(cx + size, y),
+                              fitz.Point(cx + size, y + size), fitz.Point(cx, y + size))
+            shape.draw_bezier(fitz.Point(cx, y + size), fitz.Point(cx - size * 0.3, y + size * 0.6),
+                              fitz.Point(cx - size * 0.3, y + size * 0.4), fitz.Point(cx, y))
+        shape.finish(color=None, fill=(0.35, 0.35, 0.35))
+
+    def _outlined_axis_page(self, path: str, words: int = 8, gap: float = 36.0,
+                            lone: bool = True) -> None:
+        doc = fitz.open()
+        page = doc.new_page(width=500, height=300)
+        try:
+            shape = page.new_shape()
+            x = 60.0
+            for _ in range(words):
+                self._outline_word(shape, x, 200.0, loops=2)
+                x += gap
+            if lone:
+                # A single small ornament elsewhere must stay dropped.
+                self._outline_word(shape, 420.0, 60.0, loops=1)
+            shape.commit()
+            page.insert_text(fitz.Point(40, 40), "Situation Incidents", fontname="helv",
+                             fontsize=12)
+            doc.save(path)
+        finally:
+            doc.close()
+
+    def test_row_of_outlined_words_becomes_one_region(self):
+        path = os.path.join(self._tmp.name, "outlined_axis.pdf")
+        self._outlined_axis_page(path)
+        source = fitz.open(path)
+        try:
+            page = source[0]
+            # Precondition: every word really is below the artwork floor.
+            words = [fitz.Rect(p["rect"]) for p in page.get_drawings()]
+            self.assertTrue(all(r.width < engine._ARTWORK_MIN_SIDE for r in words))
+            regions = engine._artwork_regions(page)
+        finally:
+            source.close()
+
+        self.assertEqual(len(regions), 1, regions)
+        row = regions[0]
+        self.assertGreater(row.width, 250, "the region must span the whole axis")
+        self.assertLess(row.height, 20, "and no more than the label row")
+        self.assertFalse(row.intersects(fitz.Rect(410, 50, 440, 80)),
+                         "a lone ornament is not part of the run")
+
+    def test_outlined_axis_survives_the_round_trip(self):
+        path = os.path.join(self._tmp.name, "outlined_axis_rt.pdf")
+        self._outlined_axis_page(path)
+        data, _ = engine.pdf_to_archive(path, quality="low")
+        parsed = psdi.read_struct(data)
+        rasters = [k for k in parsed.images if int(k) >= engine._ARTWORK_ID_TOP - 1000]
+        self.assertEqual(len(rasters), 1)
+
+        pdf_bytes, _ = engine.archive_to_pdf(data)
+        rebuilt = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            # Ink must be present where the first and the last word were.
+            for x in (60.0, 60.0 + 7 * 36.0):
+                clip = fitz.Rect(x - 2, 196, x + 18, 212)
+                pix = rebuilt[0].get_pixmap(dpi=144, clip=clip, colorspace=fitz.csGRAY)
+                self.assertLess(min(pix.samples), 200,
+                                f"no ink at x={x}: the label row was lost")
+            # And none where the lone ornament was: it is still dropped.
+            pix = rebuilt[0].get_pixmap(dpi=144, clip=fitz.Rect(415, 55, 435, 75),
+                                        colorspace=fitz.csGRAY)
+            self.assertEqual(min(pix.samples), 255)
+        finally:
+            rebuilt.close()
+
+    def test_lone_outlined_title_is_kept_when_long_and_curved(self):
+        # A rotated axis title is one thin path of many curves: too narrow
+        # for the floor on both sides, but a label all the same.
+        doc = fitz.open()
+        page = doc.new_page(width=400, height=300)
+        path = os.path.join(self._tmp.name, "outlined_title.pdf")
+        try:
+            shape = page.new_shape()
+            size = 7.0
+            for i in range(20):  # 40 curves, 7 pt wide, ~112 pt tall
+                y = 60 + i * size * 0.8
+                shape.draw_bezier(fitz.Point(30, y), fitz.Point(30 + size, y),
+                                  fitz.Point(30 + size, y + size), fitz.Point(30, y + size))
+                shape.draw_bezier(fitz.Point(30, y + size), fitz.Point(28, y + size * 0.6),
+                                  fitz.Point(28, y + size * 0.4), fitz.Point(30, y))
+            shape.finish(color=None, fill=(0.35, 0.35, 0.35))
+            shape.commit()
+            doc.save(path)
+        finally:
+            doc.close()
+        source = fitz.open(path)
+        try:
+            regions = engine._artwork_regions(source[0])
+        finally:
+            source.close()
+        self.assertEqual(len(regions), 1, regions)
+        self.assertGreater(regions[0].height, 100)
+        self.assertLess(regions[0].width, engine._ARTWORK_MIN_SIDE)
+
+    def test_lone_small_flourish_is_still_dropped(self):
+        doc = fitz.open()
+        page = doc.new_page(width=400, height=300)
+        path = os.path.join(self._tmp.name, "flourish.pdf")
+        try:
+            shape = page.new_shape()
+            shape.draw_circle(fitz.Point(200, 150), 5)  # four curves, 10 pt
+            shape.finish(color=None, fill=(0.35, 0.35, 0.35))
+            shape.commit()
+            doc.save(path)
+        finally:
+            doc.close()
+        source = fitz.open(path)
+        try:
+            self.assertEqual(engine._artwork_regions(source[0]), [])
+        finally:
+            source.close()
+
     def test_artwork_ids_stay_within_the_container_field(self):
         # Identifiers are written as uint16; an overflow would corrupt the
         # archive silently.

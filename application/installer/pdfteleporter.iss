@@ -12,7 +12,7 @@
 ; PyInstaller. build.cmd in the project root does both steps in order.
 
 #define AppName        "PDF Teleporter"
-#define AppVersion     "2.2.1"
+#define AppVersion     "2.2.2"
 #define AppPublisher   "PDF Teleporter project"
 #define AppExeName     "PDFteleporter.exe"
 #define CliExeName     "psditool.exe"

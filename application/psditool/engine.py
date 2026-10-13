@@ -561,6 +561,17 @@ _ARTWORK_ID_TOP = 65500
 _ARTWORK_MIN_SIDE = 24.0
 _ARTWORK_MAX_PAGE_FRACTION = 0.55
 
+# Text that a producer converted to outlines (Excel does this for chart axis
+# labels) arrives as one small curve-only path per word. Each word is below
+# the artwork size floor and the words sit too far apart to merge, so the
+# whole axis vanished. A row or column of such paths is recognised as one
+# region; a lone outline path is kept when it is long enough to be a label
+# and curved enough to be glyphs rather than a flourish.
+_GLYPH_RUN_MAX_GAP = 48.0
+_GLYPH_RUN_MIN_COUNT = 3
+_GLYPH_MIN_CURVES = 30
+_GLYPH_MIN_SHORT_SIDE = 5.0
+
 
 def _axis_lines_from_path_items(items, tolerance: float = 0.6) -> list:
     """Return the axis-aligned segments of a path as (x0, y0, x1, y1).
@@ -775,6 +786,70 @@ def _unreadable_text_regions(page) -> list:
     return _merge_boxes(boxes, pad=3.0) if boxes else []
 
 
+def _glyph_neighbours(a, b) -> bool:
+    """Report whether two small boxes sit side by side on one row or column.
+
+    Neighbours share most of their extent across the run's axis and are
+    separated along it by no more than a word gap. The overlap test is taken
+    against the smaller box so that a short word next to a tall rotated one
+    still counts.
+    """
+    v_overlap = min(a.y1, b.y1) - max(a.y0, b.y0)
+    h_gap = max(a.x0, b.x0) - min(a.x1, b.x1)
+    if v_overlap >= 0.5 * min(a.height, b.height) and h_gap <= _GLYPH_RUN_MAX_GAP:
+        return True
+    h_overlap = min(a.x1, b.x1) - max(a.x0, b.x0)
+    v_gap = max(a.y0, b.y0) - min(a.y1, b.y1)
+    return h_overlap >= 0.5 * min(a.width, b.width) and v_gap <= _GLYPH_RUN_MAX_GAP
+
+
+def _glyph_regions(small: list, curve_counts: list) -> list:
+    """Recover outlined text from boxes too small to pass as artwork alone.
+
+    Two shapes qualify. A run of at least _GLYPH_RUN_MIN_COUNT boxes aligned
+    on a row or a column -- the axis labels of a chart, one path per word --
+    becomes a single region spanning the run. A lone box qualifies when its
+    long side reaches the artwork floor and it is made of enough curves to be
+    glyph outlines rather than a decorative stroke: a rotated axis title.
+
+    Everything else stays dropped, exactly as before; the floor exists so
+    that a page of tiny ornaments does not turn into hundreds of tiles.
+    """
+    count = len(small)
+    parent = list(range(count))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            if _glyph_neighbours(small[i], small[j]):
+                parent[find(i)] = find(j)
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(count):
+        clusters.setdefault(find(i), []).append(i)
+
+    regions = []
+    for members in clusters.values():
+        union = fitz.Rect(small[members[0]])
+        for index in members[1:]:
+            union |= small[index]
+        long_side = max(union.width, union.height)
+        short_side = min(union.width, union.height)
+        if long_side < _ARTWORK_MIN_SIDE or short_side < _GLYPH_MIN_SHORT_SIDE:
+            continue
+        curves = sum(curve_counts[index] for index in members)
+        if len(members) >= _GLYPH_RUN_MIN_COUNT or curves >= _GLYPH_MIN_CURVES:
+            # A point of slack: the path rectangle is the exact ink extent
+            # and the raster must not shave the outermost pixels off.
+            regions.append(union + (-1.0, -1.0, 1.0, 1.0))
+    return regions
+
+
 def _artwork_regions(page) -> list:
     """Return the page areas that must be rasterised to survive at all.
 
@@ -784,21 +859,34 @@ def _artwork_regions(page) -> list:
     the better answer, so nothing is rasterised here.
     """
     boxes = []
+    paths = []
     for path in page.get_drawings():
-        if not _path_is_artwork(path.get("items", [])):
+        items = path.get("items", [])
+        if not _path_is_artwork(items):
             continue
         rect = fitz.Rect(path["rect"]) & page.rect
         if rect.is_empty or rect.width <= 0 or rect.height <= 0:
             continue
         boxes.append(rect)
+        paths.append((rect, sum(1 for item in items if item[0] == "c")))
 
     if not boxes:
         return []
 
-    regions = [
-        region for region in _merge_boxes(boxes)
-        if region.width >= _ARTWORK_MIN_SIDE and region.height >= _ARTWORK_MIN_SIDE
-    ]
+    regions = []
+    small = []
+    for region in _merge_boxes(boxes):
+        if region.width >= _ARTWORK_MIN_SIDE and region.height >= _ARTWORK_MIN_SIDE:
+            regions.append(region)
+        else:
+            small.append(region)
+
+    if small:
+        curve_counts = [
+            sum(curves for rect, curves in paths if rect in region)
+            for region in small
+        ]
+        regions.extend(_glyph_regions(small, curve_counts))
 
     if not regions:
         return []

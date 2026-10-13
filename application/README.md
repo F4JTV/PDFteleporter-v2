@@ -221,6 +221,20 @@ ne sont donc plus sélectionnables. Sur un bulletin de huit pages, cela
 représente environ un pour cent des mots — auparavant ces mêmes étiquettes
 étaient soit absentes, soit des taches noires.
 
+**Texte vectorisé.** Excel écrit les étiquettes d'axe de ses graphiques en
+contours de glyphes : un tracé de courbes par mot, sans aucun caractère
+derrière. Chaque mot fait 12 à 24 pt de côté, sous le plancher de 24 pt qui
+évite de rastériser la moindre fioriture, et les mots sont espacés de 25 à
+40 pt, au-delà du rayon de fusion ordinaire. Résultat sur un SITREP réel : sept
+noms de villes sur dix disparaissaient sous un graphique en barres. Une
+rangée ou une colonne d'au moins trois petits tracés alignés est désormais
+reconnue comme un libellé et rastérisée d'un bloc ; un tracé isolé l'est aussi
+quand il est assez long et fait d'assez de courbes pour être un titre d'axe
+pivoté plutôt qu'un ornement. Un ornement seul reste écarté, et le plancher
+reste en place : une page de petites décorations ne se transforme pas en
+centaines de vignettes. Coût mesuré sur le même SITREP : 0,6 à 2,4 ko selon
+le préréglage, soit environ un pour cent de l'archive.
+
 ### Correctifs de rendu hérités de l'original
 
 Ces traitements viennent de F1GBD et ont été conservés à l'identique. Ils sont
@@ -377,6 +391,18 @@ les 50 ms, les changements de phase passant toujours. Mesuré sur le même
 bulletin : à la moitié du temps, la barre est à 37–46 % ; aucun intervalle
 immobile ne dépasse 60 ms.
 
+### Étiquettes d'axe vectorisées (version 2.2.2)
+
+Sur le graphique en barres de la page 4 du SITREP OMS Mali, les noms de villes
+sous l'axe n'étaient pas du texte mais des contours vectoriels — voir « Texte
+vectorisé » plus haut. Seuls trois sur dix survivaient, ceux qui tombaient par
+hasard dans une zone d'illustration assez grande. Le regroupement en rangée
+les restitue tous, sous forme d'une à trois vignettes placées comme des images
+ordinaires, lisibles par le décodeur d'origine. Les vecteurs de référence sont
+inchangés : aucune fixture ne contenait de texte vectorisé, ce que les quatre
+tests ajoutés corrigent (rangée reconnue, aller-retour, titre isolé conservé,
+ornement isolé toujours écarté).
+
 ### Correctifs
 
 **Rotation ignorée en mode texte seul.** L'original désactivait entièrement la
@@ -472,7 +498,7 @@ après. L'interopérabilité et le poids des archives ne bougent pas.
 python -m unittest discover -s tests -t .
 ```
 
-57 tests, sans dépendance en plus de celles de l'application.
+117 tests, sans dépendance en plus de celles de l'application.
 
 | Fichier | Objet |
 |---|---|
