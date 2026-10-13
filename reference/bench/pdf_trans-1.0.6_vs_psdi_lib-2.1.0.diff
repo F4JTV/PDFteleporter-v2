@@ -1,0 +1,731 @@
+code objects: old=43 new=43 common=43
+only old: []
+only new: []
+
+=== <module> (1131 vs 1117 instructions)
+    --- old
+    +++ new
+    @@ -81,4 +81,6 @@
+     LOAD_CONST '1.0.6'
+     STORE_NAME PDF_TRANS_VERSION
+    +LOAD_CONST '2.1.0'
+    +STORE_NAME PSDI_LIB_VERSION
+     LOAD_CONST b'PSDI'
+     STORE_NAME ARCHIVE_MAGIC
+    @@ -160,5 +162,5 @@
+     LOAD_ATTR getLogger
+     PUSH_NULL 
+    -LOAD_CONST 'pdf_trans'
+    +LOAD_CONST 'psdi_lib'
+     CALL 
+     STORE_NAME logger
+    @@ -508,5 +510,5 @@
+     LOAD_CONST '__main__'
+     COMPARE_OP bool(==)
+    -POP_JUMP_IF_FALSE to L16
+    +POP_JUMP_IF_FALSE to L14
+     LOAD_CONST 0
+     LOAD_CONST None
+    @@ -523,6 +525,6 @@
+     LOAD_NAME print
+     PUSH_NULL 
+    -LOAD_CONST 'pdf_trans.py v'
+    -LOAD_NAME PDF_TRANS_VERSION
+    +LOAD_CONST 'psdi_lib.py v'
+    +LOAD_NAME PSDI_LIB_VERSION
+     FORMAT_SIMPLE 
+     BUILD_STRING 
+    @@ -541,5 +543,5 @@
+     LOAD_NAME print
+     PUSH_NULL 
+    -LOAD_CONST 'Usage: python pdf_trans.py <fichier.pdf> [quality] [mode]'
+    +LOAD_CONST 'Usage: python psdi_lib.py <fichier.pdf> [quality] [mode]'
+     CALL 
+     POP_TOP 
+    @@ -569,5 +571,5 @@
+     LOAD_NAME print
+     PUSH_NULL 
+    -LOAD_CONST 'Exemple: python pdf_trans.py PSDI.pdf low image'
+    +LOAD_CONST 'Exemple: python psdi_lib.py PSDI.pdf low image'
+     CALL 
+     POP_TOP 
+    @@ -630,6 +632,6 @@
+     LOAD_NAME print
+     PUSH_NULL 
+    -LOAD_CONST '  pdf_trans.py v'
+    -LOAD_NAME PDF_TRANS_VERSION
+    +LOAD_CONST '  psdi_lib.py v'
+    +LOAD_NAME PSDI_LIB_VERSION
+     FORMAT_SIMPLE 
+     LOAD_CONST ' - Test autonome'
+    @@ -898,12 +900,4 @@
+     STORE_NAME archive_back
+     STORE_NAME reasm_info
+    -LOAD_NAME archive_back
+    -LOAD_NAME archive_bytes
+    -COMPARE_OP bool(==)
+    -POP_JUMP_IF_TRUE to L10
+    -LOAD_ASSERTION_ERROR 
+    -LOAD_CONST 'ERREUR: round-trip TNC a échoué!'
+    -CALL 
+    -RAISE_VARARGS 
+     LOAD_NAME print
+     PUSH_NULL 
+    @@ -923,12 +917,4 @@
+     STORE_NAME archive_back2
+     STORE_NAME decode_info
+    -LOAD_NAME archive_back2
+    -LOAD_NAME archive_bytes
+    -COMPARE_OP bool(==)
+    -POP_JUMP_IF_TRUE to L11
+    -LOAD_ASSERTION_ERROR 
+    -LOAD_CONST 'ERREUR: round-trip VARA a échoué!'
+    -CALL 
+    -RAISE_VARARGS 
+     LOAD_NAME print
+     PUSH_NULL 
+    @@ -953,5 +939,5 @@
+     CALL 
+     GET_ITER 
+    -FOR_ITER to L13
+    +FOR_ITER to L11
+     UNPACK_SEQUENCE 
+     STORE_NAME radio_mode
+    @@ -969,5 +955,5 @@
+     CALL 
+     POP_TOP 
+    -JUMP_BACKWARD to L12
+    +JUMP_BACKWARD to L10
+     END_FOR 
+     POP_TOP 
+    @@ -1076,5 +1062,5 @@
+     LOAD_NAME ImportError
+     CHECK_EXC_MATCH 
+    -POP_JUMP_IF_FALSE to L17
+    +POP_JUMP_IF_FALSE to L15
+     POP_TOP 
+     LOAD_CONST False
+    @@ -1089,5 +1075,5 @@
+     LOAD_NAME ImportError
+     CHECK_EXC_MATCH 
+    -POP_JUMP_IF_FALSE to L18
+    +POP_JUMP_IF_FALSE to L16
+     POP_TOP 
+     LOAD_CONST False
+    @@ -1107,5 +1093,5 @@
+     WITH_EXCEPT_START 
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L19
+    +POP_JUMP_IF_TRUE to L17
+     RERAISE 
+     POP_TOP 
+    @@ -1113,5 +1099,5 @@
+     POP_TOP 
+     POP_TOP 
+    -JUMP_BACKWARD_NO_INTERRUPT to L14
+    +JUMP_BACKWARD_NO_INTERRUPT to L12
+     COPY 
+     POP_EXCEPT 
+    @@ -1120,5 +1106,5 @@
+     WITH_EXCEPT_START 
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L20
+    +POP_JUMP_IF_TRUE to L18
+     RERAISE 
+     POP_TOP 
+    @@ -1126,5 +1112,5 @@
+     POP_TOP 
+     POP_TOP 
+    -JUMP_BACKWARD_NO_INTERRUPT to L15
+    +JUMP_BACKWARD_NO_INTERRUPT to L13
+     COPY 
+     POP_EXCEPT 
+
+=== PDFTransferManager (180 vs 180 instructions)
+    --- old
+    +++ new
+    @@ -3,5 +3,5 @@
+     LOAD_CONST 'PDFTransferManager'
+     STORE_NAME __qualname__
+    -LOAD_CONST 731
+    +LOAD_CONST 751
+     STORE_NAME __firstlineno__
+     LOAD_CONST ('.', None)
+
+=== _extract_page_struct (846 vs 884 instructions)
+    --- old
+    +++ new
+    @@ -14,5 +14,8 @@
+     LOAD_CONST 'dict'
+     LOAD_GLOBAL fitz
+    +LOAD_ATTR TEXTFLAGS_DICT
+    +LOAD_GLOBAL fitz
+     LOAD_ATTR TEXT_PRESERVE_WHITESPACE
+    +BINARY_OP |
+     LOAD_CONST ('flags',)
+     CALL_KW 
+    @@ -22,5 +25,5 @@
+     LOAD_FAST blocks
+     GET_ITER 
+    -FOR_ITER to L37
+    +FOR_ITER to L41
+     STORE_FAST block
+     LOAD_FAST block
+    @@ -60,5 +63,5 @@
+     BINARY_SUBSCR 
+     GET_ITER 
+    -FOR_ITER to L35
+    +FOR_ITER to L39
+     STORE_FAST line
+     LOAD_FAST line
+    @@ -91,5 +94,5 @@
+     BINARY_SUBSCR 
+     GET_ITER 
+    -FOR_ITER to L33
+    +FOR_ITER to L37
+     STORE_FAST span
+     LOAD_FAST span
+    @@ -211,5 +214,5 @@
+     LOAD_FAST text_normalized
+     CONTAINS_OP 
+    -POP_JUMP_IF_FALSE to L30
+    +POP_JUMP_IF_FALSE to L34
+     LOAD_GLOBAL list + NULL
+     LOAD_FAST text_normalized
+    @@ -220,5 +223,5 @@
+     CALL 
+     GET_ITER 
+    -FOR_ITER to L29
+    +FOR_ITER to L33
+     UNPACK_SEQUENCE 
+     STORE_FAST i
+    @@ -230,4 +233,16 @@
+     JUMP_BACKWARD to L17
+     LOAD_FAST i
+    +LOAD_CONST 0
+    +COMPARE_OP bool(>)
+    +POP_JUMP_IF_FALSE to L19
+    +LOAD_FAST chars
+    +LOAD_FAST i
+    +LOAD_CONST 1
+    +BINARY_OP -
+    +BINARY_SUBSCR 
+    +JUMP_FORWARD to L20
+    +LOAD_CONST ''
+    +STORE_FAST prev_c
+    +LOAD_FAST i
+     LOAD_CONST 1
+     BINARY_OP +
+    @@ -236,5 +251,5 @@
+     CALL 
+     COMPARE_OP bool(<)
+    -POP_JUMP_IF_FALSE to L19
+    +POP_JUMP_IF_FALSE to L21
+     LOAD_FAST chars
+     LOAD_FAST i
+    @@ -242,11 +257,34 @@
+     BINARY_OP +
+     BINARY_SUBSCR 
+    -JUMP_FORWARD to L20
+    +JUMP_FORWARD to L22
+     LOAD_CONST ''
+    +STORE_FAST next_c
+    +LOAD_FAST prev_c
+    +LOAD_ATTR isalpha + NULL|self
+    +CALL 
+    +TO_BOOL 
+    +POP_JUMP_IF_FALSE to L23
+    +LOAD_FAST prev_c
+    +LOAD_ATTR islower + NULL|self
+    +CALL 
+    +TO_BOOL 
+    +POP_JUMP_IF_FALSE to L23
+    +LOAD_FAST next_c
+    +LOAD_ATTR isalpha + NULL|self
+    +CALL 
+    +TO_BOOL 
+    +POP_JUMP_IF_FALSE to L23
+    +LOAD_FAST next_c
+    +LOAD_ATTR islower + NULL|self
+    +CALL 
+    +TO_BOOL 
+    +POP_JUMP_IF_TRUE to L24
+    +JUMP_BACKWARD to L17
+    +LOAD_FAST next_c
+     STORE_FAST nxt
+     LOAD_FAST nxt
+     LOAD_CONST ('é', 'è', 'ê')
+     CONTAINS_OP 
+    -POP_JUMP_IF_FALSE to L21
+    +POP_JUMP_IF_FALSE to L25
+     LOAD_CONST 'tt'
+     LOAD_FAST chars
+    @@ -257,9 +295,9 @@
+     LOAD_CONST 'e'
+     COMPARE_OP bool(==)
+    -POP_JUMP_IF_FALSE to L28
+    +POP_JUMP_IF_FALSE to L32
+     LOAD_FAST i
+     LOAD_CONST 0
+     COMPARE_OP bool(>)
+    -POP_JUMP_IF_FALSE to L22
+    +POP_JUMP_IF_FALSE to L26
+     LOAD_FAST chars
+     LOAD_FAST i
+    @@ -267,5 +305,5 @@
+     BINARY_OP -
+     BINARY_SUBSCR 
+    -JUMP_FORWARD to L23
+    +JUMP_FORWARD to L27
+     LOAD_CONST ''
+     STORE_FAST prv
+    @@ -273,9 +311,9 @@
+     LOAD_CONST 'u'
+     COMPARE_OP bool(==)
+    -POP_JUMP_IF_FALSE to L27
+    +POP_JUMP_IF_FALSE to L31
+     LOAD_FAST i
+     LOAD_CONST 1
+     COMPARE_OP bool(>)
+    -POP_JUMP_IF_FALSE to L24
+    +POP_JUMP_IF_FALSE to L28
+     LOAD_FAST chars
+     LOAD_FAST i
+    @@ -283,5 +321,5 @@
+     BINARY_OP -
+     BINARY_SUBSCR 
+    -JUMP_FORWARD to L25
+    +JUMP_FORWARD to L29
+     LOAD_CONST ''
+     STORE_FAST prv2
+    @@ -289,5 +327,5 @@
+     LOAD_CONST 'l'
+     COMPARE_OP bool(==)
+    -POP_JUMP_IF_FALSE to L26
+    +POP_JUMP_IF_FALSE to L30
+     LOAD_CONST 'tt'
+     LOAD_FAST chars
+    @@ -345,5 +383,5 @@
+     SWAP 
+     GET_ITER 
+    -FOR_ITER to L32
+    +FOR_ITER to L36
+     STORE_FAST x
+     LOAD_GLOBAL round + NULL
+    @@ -352,5 +390,5 @@
+     CALL 
+     LIST_APPEND 
+    -JUMP_BACKWARD to L31
+    +JUMP_BACKWARD to L35
+     END_FOR 
+     POP_TOP 
+    @@ -368,5 +406,5 @@
+     BINARY_SUBSCR 
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L34
+    +POP_JUMP_IF_TRUE to L38
+     JUMP_BACKWARD to L5
+     LOAD_FAST tb
+    @@ -384,5 +422,5 @@
+     BINARY_SUBSCR 
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L36
+    +POP_JUMP_IF_TRUE to L40
+     JUMP_BACKWARD to L1
+     LOAD_FAST page_data
+    @@ -407,5 +445,5 @@
+     LOAD_FAST image_info_list
+     GET_ITER 
+    -FOR_ITER to L44
+    +FOR_ITER to L48
+     STORE_FAST ii
+     LOAD_FAST ii
+    @@ -417,6 +455,6 @@
+     LOAD_FAST xref
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L39
+    -JUMP_BACKWARD to L38
+    +POP_JUMP_IF_TRUE to L43
+    +JUMP_BACKWARD to L42
+     LOAD_GLOBAL str + NULL
+     LOAD_FAST xref
+    @@ -424,6 +462,6 @@
+     LOAD_FAST images_data
+     CONTAINS_OP 
+    -POP_JUMP_IF_TRUE to L40
+    -JUMP_BACKWARD to L38
+    +POP_JUMP_IF_TRUE to L44
+    +JUMP_BACKWARD to L42
+     LOAD_FAST ii
+     LOAD_ATTR get + NULL|self
+    @@ -451,6 +489,6 @@
+     LOAD_FAST seen_refs
+     CONTAINS_OP 
+    -POP_JUMP_IF_TRUE to L41
+    -JUMP_BACKWARD to L38
+    +POP_JUMP_IF_TRUE to L45
+    +JUMP_BACKWARD to L42
+     LOAD_FAST seen_refs
+     LOAD_ATTR add + NULL|self
+    @@ -472,5 +510,5 @@
+     SWAP 
+     GET_ITER 
+    -FOR_ITER to L43
+    +FOR_ITER to L47
+     STORE_FAST x
+     LOAD_GLOBAL round + NULL
+    @@ -479,5 +517,5 @@
+     CALL 
+     LIST_APPEND 
+    -JUMP_BACKWARD to L42
+    +JUMP_BACKWARD to L46
+     END_FOR 
+     POP_TOP 
+    @@ -488,5 +526,5 @@
+     CALL 
+     POP_TOP 
+    -JUMP_BACKWARD to L38
+    +JUMP_BACKWARD to L42
+     END_FOR 
+     POP_TOP 
+    @@ -503,5 +541,5 @@
+     CALL 
+     GET_ITER 
+    -FOR_ITER to L58
+    +FOR_ITER to L62
+     STORE_FAST path
+     LOAD_FAST path
+    @@ -522,8 +560,8 @@
+     STORE_FAST path_width
+     LOAD_FAST fill
+    -POP_JUMP_IF_NOT_NONE to L46
+    +POP_JUMP_IF_NOT_NONE to L50
+     LOAD_FAST color
+    -POP_JUMP_IF_NOT_NONE to L46
+    -JUMP_BACKWARD to L45
+    +POP_JUMP_IF_NOT_NONE to L50
+    +JUMP_BACKWARD to L49
+     LOAD_GLOBAL _rects_from_path_items + NULL
+     LOAD_FAST path
+    @@ -534,9 +572,9 @@
+     CALL 
+     GET_ITER 
+    -FOR_ITER to L57
+    +FOR_ITER to L61
+     STORE_FAST rect
+     LOAD_FAST rect
+    -POP_JUMP_IF_NOT_NONE to L48
+    -JUMP_BACKWARD to L47
+    +POP_JUMP_IF_NOT_NONE to L52
+    +JUMP_BACKWARD to L51
+     LOAD_GLOBAL fitz
+     LOAD_ATTR Rect
+    @@ -550,10 +588,10 @@
+     LOAD_ATTR is_empty
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L49
+    +POP_JUMP_IF_TRUE to L53
+     LOAD_FAST rect
+     LOAD_ATTR is_infinite
+     TO_BOOL 
+    -POP_JUMP_IF_FALSE to L50
+    -JUMP_BACKWARD to L47
+    +POP_JUMP_IF_FALSE to L54
+    +JUMP_BACKWARD to L51
+     LOAD_FAST rect
+     LOAD_ATTR width
+    @@ -567,7 +605,7 @@
+     BINARY_OP *
+     COMPARE_OP bool(>)
+    -POP_JUMP_IF_FALSE to L51
+    +POP_JUMP_IF_FALSE to L55
+     LOAD_FAST fill
+    -POP_JUMP_IF_NONE to L51
+    +POP_JUMP_IF_NONE to L55
+     LOAD_GLOBAL isinstance + NULL
+     LOAD_FAST fill
+    @@ -577,5 +615,5 @@
+     CALL 
+     TO_BOOL 
+    -POP_JUMP_IF_FALSE to L51
+    +POP_JUMP_IF_FALSE to L55
+     LOAD_GLOBAL len + NULL
+     LOAD_FAST fill
+    @@ -583,5 +621,5 @@
+     LOAD_CONST 3
+     COMPARE_OP bool(==)
+    -POP_JUMP_IF_FALSE to L51
+    +POP_JUMP_IF_FALSE to L55
+     LOAD_CONST 0.299
+     LOAD_FAST fill
+    @@ -605,6 +643,6 @@
+     LOAD_CONST 0.3
+     COMPARE_OP bool(<)
+    -POP_JUMP_IF_FALSE to L51
+    -JUMP_BACKWARD to L47
+    +POP_JUMP_IF_FALSE to L55
+    +JUMP_BACKWARD to L51
+     LOAD_CONST 'rect'
+     LOAD_FAST rect
+    @@ -615,5 +653,5 @@
+     SWAP 
+     GET_ITER 
+    -FOR_ITER to L53
+    +FOR_ITER to L57
+     STORE_FAST x
+     LOAD_GLOBAL round + NULL
+    @@ -622,5 +660,5 @@
+     CALL 
+     LIST_APPEND 
+    -JUMP_BACKWARD to L52
+    +JUMP_BACKWARD to L56
+     END_FOR 
+     POP_TOP 
+    @@ -631,5 +669,5 @@
+     STORE_FAST dr
+     LOAD_FAST fill
+    -POP_JUMP_IF_NONE to L54
+    +POP_JUMP_IF_NONE to L58
+     LOAD_GLOBAL _color_to_hex + NULL
+     LOAD_FAST fill
+    @@ -639,5 +677,5 @@
+     STORE_SUBSCR 
+     LOAD_FAST color
+    -POP_JUMP_IF_NONE to L55
+    +POP_JUMP_IF_NONE to L59
+     LOAD_GLOBAL _color_to_hex + NULL
+     LOAD_FAST color
+    @@ -648,9 +686,9 @@
+     LOAD_FAST path_width
+     TO_BOOL 
+    -POP_JUMP_IF_FALSE to L56
+    +POP_JUMP_IF_FALSE to L60
+     LOAD_FAST path_width
+     LOAD_CONST 0.1
+     COMPARE_OP bool(>)
+    -POP_JUMP_IF_FALSE to L56
+    +POP_JUMP_IF_FALSE to L60
+     LOAD_GLOBAL round + NULL
+     LOAD_FAST path_width
+    @@ -667,8 +705,8 @@
+     CALL 
+     POP_TOP 
+    -JUMP_BACKWARD to L47
+    -END_FOR 
+    -POP_TOP 
+    -JUMP_BACKWARD to L45
+    +JUMP_BACKWARD to L51
+    +END_FOR 
+    +POP_TOP 
+    +JUMP_BACKWARD to L49
+     END_FOR 
+     POP_TOP 
+    @@ -679,8 +717,8 @@
+     LOAD_FAST widgets_iter
+     TO_BOOL 
+    -POP_JUMP_IF_FALSE to L66
+    +POP_JUMP_IF_FALSE to L70
+     LOAD_FAST widgets_iter
+     GET_ITER 
+    -FOR_ITER to L65
+    +FOR_ITER to L69
+     STORE_FAST w
+     LOAD_GLOBAL getattr + NULL
+    @@ -697,5 +735,5 @@
+     COPY 
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L61
+    +POP_JUMP_IF_TRUE to L65
+     POP_TOP 
+     LOAD_CONST ''
+    @@ -708,5 +746,5 @@
+     COPY 
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L62
+    +POP_JUMP_IF_TRUE to L66
+     POP_TOP 
+     LOAD_CONST 'checkbox'
+    @@ -715,5 +753,5 @@
+     COPY 
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L62
+    +POP_JUMP_IF_TRUE to L66
+     POP_TOP 
+     LOAD_CONST 'radio'
+    @@ -723,6 +761,6 @@
+     LOAD_FAST is_check
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L63
+    -JUMP_BACKWARD to L60
+    +POP_JUMP_IF_TRUE to L67
+    +JUMP_BACKWARD to L64
+     LOAD_FAST w
+     LOAD_ATTR field_value
+    @@ -734,6 +772,6 @@
+     LOAD_FAST checked
+     TO_BOOL 
+    -POP_JUMP_IF_TRUE to L64
+    -JUMP_BACKWARD to L60
+    +POP_JUMP_IF_TRUE to L68
+    +JUMP_BACKWARD to L64
+     LOAD_FAST w
+     LOAD_ATTR rect
+    @@ -766,5 +804,5 @@
+     CALL 
+     POP_TOP 
+    -JUMP_BACKWARD to L60
+    +JUMP_BACKWARD to L64
+     END_FOR 
+     POP_TOP 
+    @@ -796,8 +834,8 @@
+     LOAD_GLOBAL Exception
+     CHECK_EXC_MATCH 
+    -POP_JUMP_IF_FALSE to L67
+    +POP_JUMP_IF_FALSE to L71
+     POP_TOP 
+     POP_EXCEPT 
+    -JUMP_BACKWARD to L47
+    +JUMP_BACKWARD to L51
+     RERAISE 
+     COPY 
+    @@ -812,10 +850,10 @@
+     LOAD_GLOBAL Exception
+     CHECK_EXC_MATCH 
+    -POP_JUMP_IF_FALSE to L68
+    +POP_JUMP_IF_FALSE to L72
+     POP_TOP 
+     LOAD_CONST None
+     STORE_FAST widgets_iter
+     POP_EXCEPT 
+    -JUMP_BACKWARD_NO_INTERRUPT to L59
+    +JUMP_BACKWARD_NO_INTERRUPT to L63
+     RERAISE 
+     COPY 
+    @@ -825,8 +863,8 @@
+     LOAD_GLOBAL Exception
+     CHECK_EXC_MATCH 
+    -POP_JUMP_IF_FALSE to L69
+    +POP_JUMP_IF_FALSE to L73
+     POP_TOP 
+     POP_EXCEPT 
+    -JUMP_BACKWARD to L60
+    +JUMP_BACKWARD to L64
+     RERAISE 
+     COPY 
+    @@ -836,5 +874,5 @@
+     LOAD_GLOBAL Exception
+     CHECK_EXC_MATCH 
+    -POP_JUMP_IF_FALSE to L70
+    +POP_JUMP_IF_FALSE to L74
+     POP_TOP 
+     POP_EXCEPT 
+
+=== archive_to_pdf (127 vs 127 instructions)
+    --- old
+    +++ new
+    @@ -94,5 +94,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR info + NULL|self
+    -LOAD_CONST '[pdf_trans] Archive→PDF: '
+    +LOAD_CONST '[psdi_lib] Archive→PDF: '
+     LOAD_GLOBAL len + NULL
+     LOAD_FAST archive_data
+
+=== decode_from_vara (284 vs 284 instructions)
+    --- old
+    +++ new
+    @@ -188,5 +188,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR warning + NULL|self
+    -LOAD_CONST '[pdf_trans] VARA CRC invalide: reçu='
+    +LOAD_CONST '[psdi_lib] VARA CRC invalide: reçu='
+     LOAD_FAST actual_crc_hex
+     FORMAT_SIMPLE 
+    @@ -225,5 +225,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR info + NULL|self
+    -LOAD_CONST '[pdf_trans] VARA decode OK: '
+    +LOAD_CONST '[psdi_lib] VARA decode OK: '
+     LOAD_GLOBAL len + NULL
+     LOAD_FAST archive_bytes
+    @@ -260,5 +260,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR error + NULL|self
+    -LOAD_CONST '[pdf_trans] VARA decode erreur: '
+    +LOAD_CONST '[psdi_lib] VARA decode erreur: '
+     LOAD_FAST e
+     FORMAT_SIMPLE 
+
+=== pdf_to_archive (235 vs 235 instructions)
+    --- old
+    +++ new
+    @@ -81,5 +81,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR info + NULL|self
+    -LOAD_CONST '[pdf_trans] Auto-bascule struct→image (raison: '
+    +LOAD_CONST '[psdi_lib] Auto-bascule struct→image (raison: '
+     LOAD_FAST auto_switch_reason
+     FORMAT_SIMPLE 
+    @@ -189,5 +189,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR info + NULL|self
+    -LOAD_CONST '[pdf_trans] PDF→archive: '
+    +LOAD_CONST '[psdi_lib] PDF→archive: '
+     LOAD_FAST orig_size
+     LOAD_CONST ','
+
+=== prepare_for_tnc (161 vs 161 instructions)
+    --- old
+    +++ new
+    @@ -140,5 +140,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR info + NULL|self
+    -LOAD_CONST '[pdf_trans] TNC prepare: '
+    +LOAD_CONST '[psdi_lib] TNC prepare: '
+     LOAD_GLOBAL len + NULL
+     LOAD_FAST archive_data
+
+=== prepare_for_vara (89 vs 89 instructions)
+    --- old
+    +++ new
+    @@ -66,5 +66,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR info + NULL|self
+    -LOAD_CONST '[pdf_trans] VARA prepare: '
+    +LOAD_CONST '[psdi_lib] VARA prepare: '
+     LOAD_GLOBAL len + NULL
+     LOAD_FAST archive_data
+
+=== reassemble_from_tnc (181 vs 181 instructions)
+    --- old
+    +++ new
+    @@ -43,5 +43,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR warning + NULL|self
+    -LOAD_CONST '[pdf_trans] TNC reassemble: incomplet '
+    +LOAD_CONST '[psdi_lib] TNC reassemble: incomplet '
+     LOAD_FAST received
+     FORMAT_SIMPLE 
+    @@ -103,5 +103,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR error + NULL|self
+    -LOAD_CONST '[pdf_trans] '
+    +LOAD_CONST '[psdi_lib] '
+     LOAD_FAST info
+     LOAD_CONST 'error'
+    @@ -123,5 +123,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR info + NULL|self
+    -LOAD_CONST '[pdf_trans] TNC reassemble OK: '
+    +LOAD_CONST '[psdi_lib] TNC reassemble OK: '
+     LOAD_GLOBAL len + NULL
+     LOAD_FAST archive_bytes
+    @@ -155,5 +155,5 @@
+     LOAD_GLOBAL logger
+     LOAD_ATTR error + NULL|self
+    -LOAD_CONST '[pdf_trans] TNC reassemble: '
+    +LOAD_CONST '[psdi_lib] TNC reassemble: '
+     LOAD_FAST info
+     LOAD_CONST 'error'
+
+identical: 34   different: 9

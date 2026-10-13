@@ -1,125 +1,29 @@
 # Source Generated with Decompyle++
 # File: PDFteleporter.pyc (Python 3.13)
 
-'''
-╔══════════════════════════════════════════════════════════════════════╗
-║                     PDF TELEPORTER v1.0.6                          ║
-║        Compression / Décompression PDF pour transfert radio         ║
-║                   F1GBD — ADRASEC 77 — FNRASEC                     ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-Application autonome pour :
-  • Compacter un PDF en fichier .psdi (archive compressée optimisée radio)
-  • Recomposer un fichier .psdi reçu en PDF
-
-Utilise la bibliothèque pdf_trans.py (même répertoire) pour la
-compression structurée (texte + images) ou rendu image des pages PDF.
-
-Formats supportés en entrée : .pdf
-Format archive : .psdi (signature PSDI, compression LZMA/zlib)
-
-Dépendances :
-  pip install pymupdf Pillow --break-system-packages
-
-Fichier requis :
-  pdf_trans.py v1.0.6 (même répertoire que PDFteleporter.py)
-
-Historique :
-  v1.0.6 (juin 2026) — Intègre pdf_trans v1.0.6 : AUTO-BASCULE en mode rendu
-                      image pour les PDF SCANNÉS ou TOURNÉS. Le mode struct
-                      ignorait la rotation de page (/Rotate) et aplatissait
-                      les images-masques en opaque, ce qui basculait les
-                      arrêtés préfectoraux scannés de 90° sur fond noir à la
-                      recomposition. pdf_to_archive() détecte désormais ces
-                      documents et route automatiquement vers le mode image
-                      (get_pixmap, qui respecte la rotation et compose les
-                      masques). Les vrais PDF texte natifs non tournés
-                      restent en mode struct. Compatibilité ascendante totale.
-                      Corrige aussi la PERTE DES CADRES ET COULEURS de tableau
-                      à la recomposition struct : les grilles et fonds de
-                      cellule tracés en segments de ligne (LibreOffice, et
-                      selon la version de MuPDF — d\'où une différence possible
-                      Windows/Linux) étaient ignorés par l\'extraction, qui ne
-                      gardait que les rectangles "re". L\'extraction reconstruit
-                      désormais les rectangles aussi à partir des lignes.
-  v1.0.5 (mai 2026) — Intègre pdf_trans v1.0.5 : correctif des CASES À
-                      COCHER perdues à la recomposition des PDF formulaires
-                      (AcroForm). L\'état coché des cases / boutons radio,
-                      logé dans l\'apparence du widget et non restitué par
-                      l\'extraction texte, est désormais relevé puis redessiné
-                      sous forme de coche vectorielle dans le PDF recomposé.
-                      Concerne notamment les SITREP ADRASEC remplis.
-                      Compatibilité ascendante totale.
-  v1.0.4 (mai 2026) — Intègre pdf_trans v1.0.4 : correctif de l\'interligne
-                      sur les PDF à fontes très petites. La hauteur du rect
-                      de rendu est désormais proportionnelle à la taille
-                      réelle des polices (au lieu d\'un minimum fixe à 12 pt
-                      qui chevauchait les lignes successives sur les SITREP
-                      Excel à fontes ~4 pt). Élimine l\'empilement vertical
-                      des paragraphes dans les cadres "Commentaires".
-                      Compatibilité ascendante totale.
-  v1.0.3 (mai 2026) — Intègre pdf_trans v1.0.3 :
-                      1) Décomposition automatique des ligatures Unicode
-                         (ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ) et heuristique de restauration
-                         pour les caractères U+FFFD produits par LibreOffice
-                         à la place des ligatures \'ti\' et \'tt\' (Situa**ti**on,
-                         qui**tt**é, Éduca**ti**on, lu**tt**e, rou**ti**er,
-                         pollu**ti**on, etc.).
-                      2) Compensation de la marge interne d\'insert_htmlbox
-                         pour éviter le débordement de texte sur les PDF
-                         Excel à fontes très petites (~4 pt) à bbox optimisés
-                         au pixel près.
-  v1.0.2 (mai 2026) — Intègre pdf_trans v1.0.2 : correctif du débordement
-                      de texte dans les cellules de tableaux lors de la
-                      recomposition structurée. La famille de fonte
-                      d\'origine (sans-serif/serif/mono) est désormais
-                      conservée pour un rendu plus fidèle. Compatibilité
-                      ascendante préservée avec les archives .psdi v1.0.0
-                      et v1.0.1.
-  v1.0.1 (mai 2026) — Intègre pdf_trans v1.0.1 (correctif fond noir
-                      Microsoft Print To PDF / Word LTSC) + correctif Linux
-                      pour l\'ouverture du PDF recomposé (xdg-open avec
-                      environnement LD_LIBRARY_PATH propre, nécessaire pour
-                      les binaires PyInstaller).
-  v1.0.0 (mars 2026) — Version initiale publique.
-
-Auteur  : F1GBD / ADRASEC 77
-Licence : Usage libre radioamateurs et sécurité civile
-'''
+from __future__ import annotations
 import os
 import sys
-import threading
 import logging
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import traceback
 from datetime import datetime
-VERSION = '1.0.6'
-
-def hide_console():
-    '''Masque la fenêtre console sous Windows.'''
-    if os.name == 'nt':
-        
-        try:
-            import ctypes
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)
-            return None
-            return None
-            return None
-
-        return None
-
-hide_console()
-logger = logging.getLogger('PDFteleporter')
+VERSION = '2.1.0'
+APP_NAME = 'PDF Teleporter'
+ORG_NAME = 'ADRASEC 77 - F1GBD'
 logging.basicConfig(level = logging.INFO, format = '%(asctime)s [%(levelname)s] %(message)s')
-PDF_TRANS_AVAILABLE = False
+logger = logging.getLogger('PDFteleporter')
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
+from PyQt6.QtGui import QIcon, QDesktopServices, QGuiApplication, QKeySequence, QShortcut
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QDialog, QLabel, QPushButton, QLineEdit, QRadioButton, QButtonGroup, QGroupBox, QVBoxLayout, QHBoxLayout, QFrame, QTextEdit, QProgressBar, QFileDialog, QMessageBox, QScrollArea
+PSDI_AVAILABLE = False
+PSDI_ERROR = ''
 
 try:
-    import pdf_trans
-    PDF_TRANS_AVAILABLE = True
-    logger.info('pdf_trans chargé — compression PDF disponible')
+    import psdi_lib
+    PSDI_AVAILABLE = True
+    logger.info('psdi_lib v%s chargé — moteur PSDI disponible', getattr(psdi_lib, 'PSDI_LIB_VERSION', '?'))
     COLORS = { }['bg_dark']['bg_medium']['bg_light']['bg_input']['text_primary']['text_secondary']['text_dim']['accent_blue']['accent_cyan']['accent_green']['accent_yellow']['accent_orange']['accent_red']['success']['warning']['error']
+    QSS = '\nQWidget {{\n    background-color: {bg_dark};\n    color: {text_primary};\n    font-family: "Segoe UI", Arial, sans-serif;\n    font-size: 10pt;\n}}\nQMainWindow, QDialog {{ background-color: {bg_dark}; }}\n\nQGroupBox {{\n    background-color: {bg_medium};\n    border: 1px solid {bg_light};\n    border-radius: 6px;\n    margin-top: 16px;\n    padding: 10px;\n    font-family: Consolas, "Courier New", monospace;\n    font-size: 11pt;\n    font-weight: bold;\n}}\nQGroupBox::title {{\n    subcontrol-origin: margin;\n    subcontrol-position: top center;\n    padding: 2px 12px;\n    background-color: {bg_dark};\n    color: {accent_cyan};\n}}\nQGroupBox#panelDecompress::title {{ color: {accent_green}; }}\nQGroupBox#panelLog {{\n    font-size: 9pt;\n    font-weight: normal;\n}}\nQGroupBox#panelLog::title {{ color: {text_dim}; subcontrol-position: top left; }}\n\nQLabel {{ background: transparent; }}\nQLabel#h1 {{\n    font-family: Consolas, "Courier New", monospace;\n    font-size: 18pt; font-weight: bold; color: {accent_orange};\n}}\nQLabel#version   {{ color: {text_dim}; font-family: Consolas, monospace; }}\nQLabel#sectionTitle {{ color: {accent_orange}; font-weight: bold; }}\nQLabel#fileInfo  {{ color: {text_dim}; font-family: Consolas, monospace; font-size: 8pt; }}\nQLabel#hint      {{ color: {text_dim}; }}\nQLabel#footer    {{ color: {text_dim}; font-size: 8pt; }}\nQLabel#statusOk  {{ color: {success}; font-family: Consolas, monospace; font-size: 9pt; }}\nQLabel#statusKo  {{ color: {error};   font-family: Consolas, monospace; font-size: 9pt; }}\nQLabel#radioHint {{ color: {text_dim}; font-size: 8pt; }}\n\nQLineEdit {{\n    background-color: {bg_input};\n    color: {text_primary};\n    border: 1px solid {bg_light};\n    border-radius: 3px;\n    padding: 4px 6px;\n    font-family: Consolas, "Courier New", monospace;\n    font-size: 9pt;\n}}\nQLineEdit:read-only {{ color: {text_secondary}; }}\n\nQPushButton {{\n    background-color: {bg_light};\n    color: {text_primary};\n    border: 1px solid #2a3350;\n    border-radius: 4px;\n    padding: 5px 10px;\n}}\nQPushButton:hover  {{ background-color: #27304f; }}\nQPushButton:pressed{{ background-color: #161c30; }}\nQPushButton:disabled {{ color: {text_dim}; background-color: #12172a; border-color: #1b2138; }}\n\nQPushButton#browseBlue  {{ color: {accent_blue}; }}\nQPushButton#browseGreen {{ color: {accent_green}; }}\n\nQPushButton#primaryCyan, QPushButton#primaryGreen, QPushButton#primaryYellow {{\n    color: #000000;\n    font-family: Consolas, "Courier New", monospace;\n    font-weight: bold;\n    border: none;\n    border-radius: 5px;\n    padding: 10px;\n    font-size: 12pt;\n}}\nQPushButton#primaryCyan   {{ background-color: {accent_cyan}; }}\nQPushButton#primaryCyan:hover  {{ background-color: #62efff; }}\nQPushButton#primaryGreen  {{ background-color: {accent_green}; }}\nQPushButton#primaryGreen:hover {{ background-color: #66ffa6; }}\nQPushButton#primaryYellow {{ background-color: {accent_yellow}; font-size: 10pt; padding: 7px; }}\nQPushButton#primaryYellow:hover {{ background-color: #ffff74; }}\nQPushButton#primaryCyan:disabled, QPushButton#primaryGreen:disabled,\nQPushButton#primaryYellow:disabled {{ background-color: #263042; color: {text_dim}; }}\n\nQRadioButton {{ background: transparent; spacing: 6px; padding: 1px; }}\nQRadioButton::indicator {{ width: 13px; height: 13px; }}\nQRadioButton::indicator:unchecked {{\n    border: 2px solid {text_dim}; border-radius: 8px; background: {bg_dark};\n}}\nQRadioButton::indicator:checked {{\n    border: 2px solid {accent_cyan}; border-radius: 8px; background: {accent_cyan};\n}}\n\nQTextEdit {{\n    background-color: {bg_dark};\n    color: {text_secondary};\n    border: 1px solid {bg_light};\n    border-radius: 3px;\n    font-family: Consolas, "Courier New", monospace;\n    font-size: 9pt;\n}}\nQTextEdit#estimates {{ color: {accent_cyan}; border: 1px solid #202a45; }}\n\nQProgressBar {{\n    background-color: {bg_input};\n    border: 1px solid {bg_light};\n    border-radius: 3px;\n    text-align: center;\n    color: {text_secondary};\n    font-size: 8pt;\n    height: 14px;\n}}\nQProgressBar::chunk {{ background-color: {accent_blue}; border-radius: 2px; }}\n\nQScrollArea {{ background: transparent; border: none; }}\nQScrollArea > QWidget > QWidget {{ background: transparent; }}\n\nQScrollBar:vertical {{ background: {bg_dark}; width: 10px; margin: 0; }}\nQScrollBar::handle:vertical {{ background: {bg_light}; border-radius: 5px; min-height: 24px; }}\nQScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}\nQFrame#hline {{ background-color: {bg_light}; max-height: 1px; border: none; }}\nQFrame#accentLine {{ background-color: {accent_orange}; max-height: 2px; border: none; }}\n'.format(**COLORS)
     QUALITY_LABELS = {
         'ultra_low': ('⚡ Ultra Low', 'Urgence — Packet 1200 baud (~5% taille)'),
         'low': ('📡 Low', 'Packet 9600 / VARA HF lent (~10% taille)'),
@@ -130,620 +34,962 @@ try:
         'struct': 'Structuré (texte + images)',
         'image': 'Rendu image (pages JPEG)' }
     
-    class PDFTeleporterApp:
-        __firstlineno__ = 168
-        __doc__ = 'Application GUI autonome de compression / décompression PDF.'
-        
-        def __init__(self):
-            self._setup_dpi()
-            self.root = tk.Tk()
-            self.root.title(f'''📄 PDF Teleporter v{VERSION} — par F1GBD ADRASEC 77''')
-            self.root.configure(bg = COLORS['bg_dark'])
-            self.root.minsize(820, 600)
-            self.root.update_idletasks()
-            sw = self.root.winfo_screenwidth()
-            sh = self.root.winfo_screenheight()
-            w = min(900, sw - 40)
-            h = sh - 60
-            x = max(0, (sw - w) // 2)
-            self.root.geometry(f'''{w}x{h}+{x}+0''')
+    def resource_path(name):
+        base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base, name)
+
+    
+    def app_icon():
+        for candidate in ('PDteleporter_color.ico', 'PDFteleporter.ico', 'PDFteleporter_bw.ico'):
+            path = resource_path(candidate)
+            if not os.path.exists(path):
+                continue
             
-            try:
-                self.root.state('zoomed')
-                self._busy = False
-                self._last_psdi_path = None
-                self._build_gui()
-                return None
+            return ('PDteleporter_color.ico', 'PDFteleporter.ico', 'PDFteleporter_bw.ico'), QIcon(path)
+        return QIcon()
 
-            continue
+    
+    def human_size(num):
+        return f'''{num:,} octets ({num // 1024} Ko)'''.replace(',', ' ')
 
+    
+    def open_with_system(path):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    
+    class Worker(QThread):
+        __firstlineno__ = 358
+        progress = pyqtSignal(int, int, str)
+        result = pyqtSignal(object)
+        error = pyqtSignal(str)
         
-        def _setup_dpi(self):
-            '''Configure le DPI awareness selon la version de Windows.'''
-            if os.name != 'nt':
-                pass
-            return None
-            
-            try:
-                import ctypes
-                ver = sys.getwindowsversion()
-                if ver.build >= 22000:
-                    
-                    try:
-                        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-                        return None
-                        
-                        try:
-                            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-                            return None
-                            except Exception:
-                                ctypes.windll.user32.SetProcessDPIAware()
-                                
-                                try:
-                                    return None
-                                    
-                                    try:
-                                        except Exception:
-                                            ctypes.windll.user32.SetProcessDPIAware()
-                                            
-                                            try:
-                                                return None
-                                                
-                                                try:
-                                                    pass
-
-                                                return None
-
-
-
-
-
-
-
-        
-        def _build_gui(self):
-            """Construit toute l'interface."""
-            main = tk.Frame(self.root, bg = COLORS['bg_dark'])
-            main.pack(fill = tk.BOTH, expand = True, padx = 10, pady = 10)
-            self._build_header(main)
-            center = tk.Frame(main, bg = COLORS['bg_dark'])
-            center.pack(fill = tk.BOTH, expand = True, pady = (10, 0))
-            left = tk.LabelFrame(center, text = '  📦  COMPACTER  (PDF → .psdi)  ', font = ('Consolas', 11, 'bold'), fg = COLORS['accent_cyan'], bg = COLORS['bg_medium'], labelanchor = 'n', padx = 10, pady = 10)
-            left.pack(side = tk.LEFT, fill = tk.BOTH, expand = True, padx = (0, 5))
-            self._build_compress_panel(left)
-            right = tk.LabelFrame(center, text = '  📬  RECOMPOSER  (.psdi → PDF)  ', font = ('Consolas', 11, 'bold'), fg = COLORS['accent_green'], bg = COLORS['bg_medium'], labelanchor = 'n', padx = 10, pady = 10)
-            right.pack(side = tk.RIGHT, fill = tk.BOTH, expand = True, padx = (5, 0))
-            self._build_decompress_panel(right)
-            self._build_log_panel(main)
-            self._build_footer(main)
-
-        
-        def _build_header(self, parent):
-            hdr = tk.Frame(parent, bg = COLORS['bg_dark'])
-            hdr.pack(fill = tk.X)
-            tk.Label(hdr, text = '📄  PDF TELEPORTER', font = ('Consolas', 16, 'bold'), fg = COLORS['accent_orange'], bg = COLORS['bg_dark']).pack(side = tk.LEFT, padx = (5, 15))
-            tk.Label(hdr, text = f'''v{VERSION}''', font = ('Consolas', 9), fg = COLORS['text_dim'], bg = COLORS['bg_dark']).pack(side = tk.LEFT)
-            tk.Button(hdr, text = 'ℹ️ A PROPOS', font = ('Arial', 8, 'bold'), bg = COLORS['bg_light'], fg = COLORS['accent_yellow'], activebackground = COLORS['accent_yellow'], activeforeground = 'black', relief = 'flat', padx = 6, pady = 1, cursor = 'hand2', command = self._show_about).pack(side = tk.LEFT, padx = (10, 0))
-            status_text = '✅ pdf_trans chargé' if PDF_TRANS_AVAILABLE else '❌ pdf_trans manquant'
-            status_color = COLORS['success'] if PDF_TRANS_AVAILABLE else COLORS['error']
-            tk.Label(hdr, text = status_text, font = ('Consolas', 9), fg = status_color, bg = COLORS['bg_dark']).pack(side = tk.RIGHT, padx = 5)
-
-        
-        def _show_about(self):
-            '''Affiche la fenêtre À propos.'''
-            about_win = tk.Toplevel(self.root)
-            about_win.title('À propos — PDF Teleporter')
-            about_win.configure(bg = COLORS['bg_dark'])
-            about_win.resizable(False, False)
-            about_win.transient(self.root)
-            about_win.grab_set()
-            about_win.update_idletasks()
-            x = self.root.winfo_x() + (self.root.winfo_width() - 520) // 2
-            y = self.root.winfo_y() + (self.root.winfo_height() - 530) // 2
-            about_win.geometry(f'''520x530+{x}+{y}''')
-            tk.Label(about_win, text = '📄  PDF Teleporter', font = ('Consolas', 16, 'bold'), fg = COLORS['accent_orange'], bg = COLORS['bg_dark']).pack(pady = (15, 2))
-            tk.Label(about_win, text = 'Mars 2026', font = ('Consolas', 10), fg = COLORS['text_dim'], bg = COLORS['bg_dark']).pack()
-            tk.Frame(about_win, bg = COLORS['accent_orange'], height = 2).pack(fill = tk.X, padx = 30, pady = 10)
-            about_text = 'Un outil de Téléportation de document PDF :\n\nCompression de documents PDF (SITREP, PSD, BSD,\nORSEC, FICHES REFLEXES) pour de la transmission\nvia les modes radio TNC Packet et VARA Modem\n(HF/FM/SAT) de TCQ ou Winlink Express.\n\n• Les données texte, tableaux et images sont extraites\n  du PDF, compressées individuellement et transmises\n  dans une archive PSDI minimale.\n\n• Le fichier PSDI est recomposé côté réception avec\n  sa mise en forme originale (tableaux, images, textes)\n  sans aucune opération manuelle spécifique.'
-            tk.Label(about_win, text = about_text, font = ('Arial', 9), fg = COLORS['text_secondary'], bg = COLORS['bg_dark'], justify = tk.LEFT).pack(padx = 25, pady = (0, 10))
-            tk.Frame(about_win, bg = COLORS['text_dim'], height = 1).pack(fill = tk.X, padx = 30, pady = 5)
-            tk.Label(about_win, text = 'Développé par F1GBD (Jean-Louis Naudin)\nADRASEC 77 — Sécurité Civile — FNRASEC', font = ('Consolas', 9, 'bold'), fg = COLORS['accent_cyan'], bg = COLORS['bg_dark']).pack(pady = (5, 10))
-            tk.Button(about_win, text = 'Fermer', font = ('Arial', 10), bg = COLORS['bg_light'], fg = COLORS['text_primary'], activebackground = COLORS['accent_blue'], activeforeground = 'black', relief = 'flat', padx = 20, pady = 3, cursor = 'hand2', command = about_win.destroy).pack(pady = (0, 15))
-
-        
-        def _build_compress_panel(self, parent):
-            file_frame = tk.Frame(parent, bg = COLORS['bg_medium'])
-            file_frame.pack(fill = tk.X, pady = (0, 8))
-            tk.Label(file_frame, text = 'Fichier PDF :', font = ('Arial', 9), fg = COLORS['text_secondary'], bg = COLORS['bg_medium']).pack(anchor = 'w')
-            row = tk.Frame(file_frame, bg = COLORS['bg_medium'])
-            row.pack(fill = tk.X)
-            self.var_pdf_path = tk.StringVar()
-            tk.Entry(row, textvariable = self.var_pdf_path, font = ('Consolas', 9), bg = COLORS['bg_input'], fg = COLORS['text_primary'], insertbackground = COLORS['text_primary'], state = 'readonly').pack(side = tk.LEFT, fill = tk.X, expand = True, padx = (0, 5))
-            tk.Button(row, text = '📂 Parcourir', font = ('Arial', 9), bg = COLORS['bg_light'], fg = COLORS['accent_blue'], activebackground = COLORS['accent_blue'], activeforeground = 'black', relief = 'flat', padx = 8, command = self._browse_pdf).pack(side = tk.RIGHT)
-            self.var_pdf_info = tk.StringVar(value = 'Aucun fichier sélectionné')
-            tk.Label(parent, textvariable = self.var_pdf_info, font = ('Consolas', 8), fg = COLORS['text_dim'], bg = COLORS['bg_medium'], anchor = 'w').pack(fill = tk.X, pady = (0, 5))
-            tk.Label(parent, text = 'Qualité de compression :', font = ('Arial', 9, 'bold'), fg = COLORS['accent_orange'], bg = COLORS['bg_medium']).pack(anchor = 'w', pady = (5, 3))
-            self.var_quality = tk.StringVar(value = 'medium')
-            qual_frame = tk.Frame(parent, bg = COLORS['bg_medium'])
-            qual_frame.pack(fill = tk.X)
-            for qkey in ('ultra_low', 'low', 'medium', 'high', 'fast'):
-                (label, desc) = QUALITY_LABELS[qkey]
-                rb_row = tk.Frame(qual_frame, bg = COLORS['bg_medium'])
-                rb_row.pack(fill = tk.X, pady = 1)
-                tk.Radiobutton(rb_row, text = label, variable = self.var_quality, value = qkey, font = ('Arial', 9, 'bold'), fg = COLORS['text_primary'], bg = COLORS['bg_medium'], selectcolor = COLORS['bg_dark'], activebackground = COLORS['bg_medium'], command = self._update_estimates).pack(side = tk.LEFT)
-                tk.Label(rb_row, text = f'''  {desc}''', font = ('Arial', 7), fg = COLORS['text_dim'], bg = COLORS['bg_medium']).pack(side = tk.LEFT)
-            tk.Label(parent, text = 'Mode :', font = ('Arial', 9, 'bold'), fg = COLORS['accent_orange'], bg = COLORS['bg_medium']).pack(anchor = 'w', pady = (8, 2))
-            mode_frame = tk.Frame(parent, bg = COLORS['bg_medium'])
-            mode_frame.pack(fill = tk.X)
-            self.var_mode = tk.StringVar(value = 'struct')
-            for mkey, mlabel in MODE_LABELS.items():
-                tk.Radiobutton(mode_frame, text = mlabel, variable = self.var_mode, value = mkey, font = ('Arial', 9), fg = COLORS['text_primary'], bg = COLORS['bg_medium'], selectcolor = COLORS['bg_dark'], activebackground = COLORS['bg_medium'], command = self._update_estimates).pack(anchor = 'w')
-            MODE_LABELS.items()
-            est_frame = tk.Frame(parent, bg = COLORS['bg_dark'], relief = tk.SUNKEN, bd = 1)
-            est_frame.pack(fill = tk.X, pady = (10, 5))
-            self.var_estimates = tk.StringVar(value = 'Sélectionnez un PDF pour voir les estimations')
-            tk.Label(est_frame, textvariable = self.var_estimates, font = ('Consolas', 8), fg = COLORS['accent_cyan'], bg = COLORS['bg_dark'], justify = tk.LEFT, anchor = 'w').pack(fill = tk.X, padx = 8, pady = 6)
-            self.btn_compress = tk.Button(parent, text = '📦  COMPACTER  →  .psdi', font = ('Consolas', 12, 'bold'), bg = COLORS['accent_cyan'], fg = 'black', activebackground = '#00b8d4', activeforeground = 'black', relief = 'flat', pady = 8, cursor = 'hand2', command = self._do_compress, state = tk.DISABLED)
-            self.btn_compress.pack(fill = tk.X, pady = (10, 0))
-            self.var_compress_status = tk.StringVar(value = '')
-            tk.Label(parent, textvariable = self.var_compress_status, font = ('Arial', 8), fg = COLORS['accent_green'], bg = COLORS['bg_medium']).pack(fill = tk.X, pady = (3, 0))
-            self.btn_winlink = tk.Button(parent, text = '📧  Préparer pour Winlink', font = ('Consolas', 10, 'bold'), bg = COLORS['accent_yellow'], fg = 'black', activebackground = '#ffca28', activeforeground = 'black', relief = 'flat', pady = 5, cursor = 'hand2', command = self._do_winlink, state = tk.DISABLED)
-            self.btn_winlink.pack(fill = tk.X, pady = (5, 0))
-
-        
-        def _build_decompress_panel(self, parent):
-            file_frame = tk.Frame(parent, bg = COLORS['bg_medium'])
-            file_frame.pack(fill = tk.X, pady = (0, 8))
-            tk.Label(file_frame, text = 'Fichier .psdi reçu :', font = ('Arial', 9), fg = COLORS['text_secondary'], bg = COLORS['bg_medium']).pack(anchor = 'w')
-            row = tk.Frame(file_frame, bg = COLORS['bg_medium'])
-            row.pack(fill = tk.X)
-            self.var_psdi_path = tk.StringVar()
-            tk.Entry(row, textvariable = self.var_psdi_path, font = ('Consolas', 9), bg = COLORS['bg_input'], fg = COLORS['text_primary'], insertbackground = COLORS['text_primary'], state = 'readonly').pack(side = tk.LEFT, fill = tk.X, expand = True, padx = (0, 5))
-            tk.Button(row, text = '📂 Parcourir', font = ('Arial', 9), bg = COLORS['bg_light'], fg = COLORS['accent_green'], activebackground = COLORS['accent_green'], activeforeground = 'black', relief = 'flat', padx = 8, command = self._browse_psdi).pack(side = tk.RIGHT)
-            self.var_psdi_info = tk.StringVar(value = 'Aucun fichier sélectionné')
-            tk.Label(parent, textvariable = self.var_psdi_info, font = ('Consolas', 8), fg = COLORS['text_dim'], bg = COLORS['bg_medium'], anchor = 'w', justify = tk.LEFT).pack(fill = tk.X, pady = (0, 5))
-            self.var_psdi_valid = tk.StringVar(value = '')
-            tk.Label(parent, textvariable = self.var_psdi_valid, font = ('Consolas', 9), fg = COLORS['accent_green'], bg = COLORS['bg_medium'], anchor = 'w', justify = tk.LEFT).pack(fill = tk.X, pady = (0, 8))
-            ttk.Separator(parent, orient = 'horizontal').pack(fill = tk.X, pady = 5)
-            tk.Label(parent, text = "Le fichier .psdi sera décompressé et\nrecomposé en document PDF.\n\nLe PDF résultant contiendra le texte et\nles images compressées de l'original.\n\nModes supportés :\n  • Structuré (texte + images repositionnées)\n  • Rendu image (pages en JPEG)", font = ('Arial', 9), fg = COLORS['text_dim'], bg = COLORS['bg_medium'], justify = tk.LEFT).pack(fill = tk.X, pady = 5)
-            self.btn_decompress = tk.Button(parent, text = '📬  RECOMPOSER  →  .pdf', font = ('Consolas', 12, 'bold'), bg = COLORS['accent_green'], fg = 'black', activebackground = '#00e676', activeforeground = 'black', relief = 'flat', pady = 8, cursor = 'hand2', command = self._do_decompress, state = tk.DISABLED)
-            self.btn_decompress.pack(fill = tk.X, pady = (10, 0))
-            self.var_decompress_status = tk.StringVar(value = '')
-            tk.Label(parent, textvariable = self.var_decompress_status, font = ('Arial', 8), fg = COLORS['accent_cyan'], bg = COLORS['bg_medium']).pack(fill = tk.X, pady = (3, 0))
-            self.btn_open_pdf = tk.Button(parent, text = '📂  Ouvrir le PDF recomposé', font = ('Arial', 10, 'bold'), bg = COLORS['bg_light'], fg = COLORS['accent_yellow'], activebackground = COLORS['accent_yellow'], activeforeground = 'black', relief = 'flat', pady = 5, cursor = 'hand2', command = self._open_last_pdf)
-            self._last_pdf_path = None
-
-        
-        def _build_log_panel(self, parent):
-            log_frame = tk.LabelFrame(parent, text = '  📋 Journal  ', font = ('Consolas', 9), fg = COLORS['text_dim'], bg = COLORS['bg_medium'], labelanchor = 'nw')
-            log_frame.pack(fill = tk.X, pady = (10, 0))
-            self.log_text = tk.Text(log_frame, height = 4, font = ('Consolas', 8), bg = COLORS['bg_dark'], fg = COLORS['text_secondary'], insertbackground = COLORS['text_primary'], relief = tk.FLAT, wrap = tk.WORD, state = tk.DISABLED)
-            self.log_text.pack(fill = tk.X, padx = 3, pady = 3)
-            self.log_text.tag_configure('info', foreground = COLORS['text_secondary'])
-            self.log_text.tag_configure('success', foreground = COLORS['success'])
-            self.log_text.tag_configure('warning', foreground = COLORS['warning'])
-            self.log_text.tag_configure('error', foreground = COLORS['error'])
-            self.log_text.tag_configure('timestamp', foreground = COLORS['text_dim'])
-
-        
-        def _build_footer(self, parent):
-            footer = tk.Frame(parent, bg = COLORS['bg_dark'])
-            footer.pack(fill = tk.X, pady = (8, 0))
-            tk.Label(footer, text = 'Développé par F1GBD (mai 2026) — ADRASEC 77 — FNRASEC', font = ('Arial', 7), fg = COLORS['text_dim'], bg = COLORS['bg_dark']).pack(side = tk.RIGHT)
-            tk.Label(footer, text = 'Téleportation de PDF par Radio', font = ('Arial', 7), fg = COLORS['text_dim'], bg = COLORS['bg_dark']).pack(side = tk.LEFT)
-
-        
-        def _log(self, msg, level = 'info'):
-            '''Ajoute un message au journal.'''
-            ts = datetime.now().strftime('%H:%M:%S')
-            
-            try:
-                self.log_text.config(state = tk.NORMAL)
-                self.log_text.insert(tk.END, f'''[{ts}] ''', 'timestamp')
-                self.log_text.insert(tk.END, f'''{msg}\n''', level)
-                self.log_text.see(tk.END)
-                self.log_text.config(state = tk.DISABLED)
-                return None
-
-
-        
-        def _browse_pdf(self):
-            '''Sélectionne un fichier PDF à compacter.'''
-            path = filedialog.askopenfilename(title = 'Sélectionner un document PDF', filetypes = [
-                ('Documents PDF', '*.pdf'),
-                ('Tous', '*.*')])
-            if not path:
-                pass
-            return None
-            self.var_pdf_path.set(path)
-            size = os.path.getsize(path)
-            name = os.path.basename(path)
-            self.var_pdf_info.set(f'''📎 {name}  —  {size:,} octets ({size // 1024} Ko)''')
-            self.btn_compress.config(state = tk.NORMAL if PDF_TRANS_AVAILABLE else tk.DISABLED)
-            self._log(f'''PDF sélectionné : {name} ({size:,} octets)''')
-            self._update_estimates()
-
-        
-        def _browse_psdi(self):
-            '''Sélectionne un fichier .psdi à recomposer.'''
-            path = filedialog.askopenfilename(title = 'Sélectionner une archive .psdi', filetypes = [
-                ('Archives PSDI', '*.psdi'),
-                ('Tous', '*.*')])
-            if not path:
-                pass
-            return None
-            self.var_psdi_path.set(path)
-            size = os.path.getsize(path)
-            name = os.path.basename(path)
-            self.var_psdi_info.set(f'''📎 {name}  —  {size:,} octets ({size // 1024} Ko)''')
-            self._log(f'''Archive sélectionnée : {name} ({size:,} octets)''')
-            if PDF_TRANS_AVAILABLE:
-                
-                try:
-                    f = open(path, 'rb')
-                    data = f.read()
-                    
-                    try:
-                        None(None, None)
-                        result = pdf_trans.validate_archive(data)
-                        None if result.get('valid') else None
-                        
-                        try:
-                            'Image'
-                            'Structuré'
-                            continue
-                        except Exception:
-                            e = 'Structuré'
-                            self.var_psdi_valid.set(f'''❌ Erreur lecture : {e}''')
-                            self.btn_decompress.config(state = tk.DISABLED)
-                            self._log(f'''Erreur lecture archive : {e}''', 'error')
-
-                        e = None
-                        del e
-                        continue
-                        e = None
-                        del e
-
-
-
-        
-        def _update_estimates(self):
-            '''Met à jour les estimations de taille et temps de transfert.'''
-            path = self.var_pdf_path.get()
-            if not path and os.path.exists(path) or PDF_TRANS_AVAILABLE:
-                pass
-            return None
-            quality = self.var_quality.get()
-            mode = self.var_mode.get()
-            
-            def _compute():
-                
-                try:
-                    actual_quality = 'ultra_low' if quality == 'fast' else quality
-                    skip_img = quality == 'fast'
-                    (_, info) = pdf_trans.pdf_to_archive(path, quality = actual_quality, mode = mode, skip_images = skip_img)
-                    arch_size = info['archive_size']
-                    ratio = info['ratio_percent']
-                    est = info.get('estimates', { })
-                    t_info = pdf_trans.get_transfer_info(arch_size)
-                    nb_frags = t_info.get('tnc_fragments', '?')
-                    lines = [
-                        f'''Archive : {arch_size:,} octets ({arch_size // 1024} Ko) — {ratio}% de l\'original''',
-                        f'''Fragments TNC : {nb_frags} trames''',
-                        '']
-                    for name, duration in est.items():
-                        lines.append(f'''  ⏱ {name} : {duration}''')
-                    text = '\n'.join(lines)
-                    self.root.after(0, (lambda : self.var_estimates.set(text)))
-                    return None
-                except Exception:
-                    e = None
-                    self.root.after(0, (lambda : self.var_estimates.set(f'''Erreur : {e}''')))
-
-                e = None
-                del e
-                return None
-                e = None
-                del e
-
-            self.var_estimates.set('⏳ Calcul des estimations...')
-            threading.Thread(target = _compute, daemon = True).start()
-
-        
-        def _do_compress(self):
-            '''Lance la compression PDF → .psdi.'''
-            if not self._busy or PDF_TRANS_AVAILABLE:
-                pass
-            return None
-            pdf_path = self.var_pdf_path.get()
-            if not pdf_path or os.path.exists(pdf_path):
-                messagebox.showwarning('Attention', 'Sélectionnez un fichier PDF valide.')
-            return None
-            quality = self.var_quality.get()
-            mode = self.var_mode.get()
-            actual_quality = 'ultra_low' if quality == 'fast' else quality
-            skip_img = quality == 'fast'
-            base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-            default_name = f'''{base_name}_{quality}.psdi'''
-            output_path = filedialog.asksaveasfilename(title = "Enregistrer l'archive compactée", initialfile = default_name, defaultextension = '.psdi', filetypes = [
-                ('Archives PSDI', '*.psdi'),
-                ('Tous', '*.*')])
-            if not output_path:
-                pass
-            return None
-            self._busy = True
-            self.btn_compress.config(state = tk.DISABLED, text = '⏳ Compression en cours...')
-            self._log(f'''Compression : {os.path.basename(pdf_path)} → qualité={quality}, mode={mode}''')
-            
-            def progress_cb(step, total, msg):
-                self.root.after(0, (lambda m = msg: self.var_compress_status.set(m)))
-                self.root.after(0, (lambda m = msg: self._log(m)))
-
-            
-            def _thread():
-                
-                try:
-                    (archive_data, info) = pdf_trans.pdf_to_archive(pdf_path, quality = actual_quality, mode = mode, output_path = output_path, progress_callback = progress_cb, skip_images = skip_img)
-                    orig = info['original_size']
-                    arch = info['archive_size']
-                    ratio = info['ratio_percent']
-                    elapsed = info.get('compression_time', 0)
-                    
-                    def _done():
-                        self._busy = False
-                        self.btn_compress.config(state = tk.NORMAL, text = '📦  COMPACTER  →  .psdi')
-                        self.var_compress_status.set(f'''✅ {os.path.basename(output_path)} — {arch:,} octets ({ratio}%) en {elapsed:.1f}s''')
-                        self._log(f'''✅ Compacté : {orig:,} → {arch:,} octets ({ratio}%, ×{orig / arch:.1f}) en {elapsed:.1f}s''', 'success')
-                        self._log(f'''   Fichier : {output_path}''', 'success')
-                        self._last_psdi_path = output_path
-                        self.btn_winlink.config(state = tk.NORMAL)
-
-                    self.root.after(0, _done)
-                    return None
-                except Exception:
-                    e = None
-                    
-                    def _err():
-                        self._busy = False
-                        self.btn_compress.config(state = tk.NORMAL, text = '📦  COMPACTER  →  .psdi')
-                        self.var_compress_status.set(f'''❌ Erreur : {e}''')
-                        self._log(f'''Erreur compression : {e}''', 'error')
-
-                    self.root.after(0, _err)
-
-                e = None
-                del e
-                return None
-                e = None
-                del e
-
-            threading.Thread(target = _thread, daemon = True).start()
-
-        
-        def _do_winlink(self):
-            '''Prépare le fichier .psdi pour envoi via Winlink Express.'''
-            psdi_path = getattr(self, '_last_psdi_path', None)
-            if not psdi_path or os.path.exists(psdi_path):
-                messagebox.showwarning('Attention', "Compactez d'abord un PDF avant de préparer un message Winlink.")
-            return None
-            psdi_name = os.path.basename(psdi_path)
-            psdi_size = os.path.getsize(psdi_path)
-            
-            try:
-                docs_dir = os.path.join(os.path.expanduser('~'), 'Documents', 'PDFteleporter')
-                os.makedirs(docs_dir, exist_ok = True)
-                dest_path = os.path.join(docs_dir, psdi_name)
-                if os.path.abspath(psdi_path) != os.path.abspath(dest_path):
-                    import shutil
-                shutil.copy2(psdi_path, dest_path)
-                win = tk.Toplevel(self.root)
-                win.title('📧 Envoi via Winlink Express')
-                win.configure(bg = COLORS['bg_dark'])
-                win.resizable(False, False)
-                win.transient(self.root)
-                win.grab_set()
-                win.update_idletasks()
-                x = self.root.winfo_x() + (self.root.winfo_width() - 520) // 2
-                y = self.root.winfo_y() + (self.root.winfo_height() - 520) // 2
-                win.geometry(f'''520x520+{x}+{y}''')
-                tk.Label(win, text = '📧  Envoi via Winlink Express', font = ('Consolas', 13, 'bold'), fg = COLORS['accent_yellow'], bg = COLORS['bg_dark']).pack(pady = (12, 3))
-                tk.Label(win, text = f'''📎 {psdi_name}\n{psdi_size:,} octets ({psdi_size // 1024} Ko)''', font = ('Consolas', 9), fg = COLORS['text_secondary'], bg = COLORS['bg_dark']).pack(pady = (0, 5))
-                tk.Frame(win, bg = COLORS['accent_yellow'], height = 2).pack(fill = tk.X, padx = 25, pady = 5)
-                instructions = f'''📋  Procédure d\'envoi :\n\n1.  Ouvrez Winlink Express\n\n2.  Cliquez sur  Message → New Message...\n\n3.  Remplissez le destinataire (indicatif)\n\n4.  Sujet suggéré :  [PSDI] nom_du_document\n\n5.  Cliquez sur  Attachments → Add\n     Sélectionnez le fichier :\n     📂 {dest_path}\n\n6.  Dans le corps du message, indiquez :\n     « Recomposer avec PDF Teleporter »\n\n7.  Cliquez  Post to Outbox\n\n8.  Envoyez via  VARA HF / FM / Packet / Telnet'''
-                instr_frame = tk.Frame(win, bg = COLORS['bg_medium'], relief = tk.RIDGE, bd = 1)
-                instr_frame.pack(fill = tk.BOTH, expand = True, padx = 15, pady = 5)
-                tk.Label(instr_frame, text = instructions, font = ('Arial', 9), fg = COLORS['text_primary'], bg = COLORS['bg_medium'], justify = tk.LEFT, anchor = 'nw').pack(fill = tk.BOTH, padx = 10, pady = 8)
-                btn_frame = tk.Frame(win, bg = COLORS['bg_dark'])
-                btn_frame.pack(fill = tk.X, padx = 15, pady = (5, 12))
-                
-                def _open_folder():
-                    '''Ouvre le dossier contenant le .psdi.'''
-                    folder = os.path.dirname(dest_path)
-                    
-                    try:
-                        if sys.platform == 'win32':
-                            os.startfile(folder)
-                        return None
-                        
-                        try:
-                            if sys.platform == 'darwin':
-                                import subprocess
-                                subprocess.Popen([
-                                    'open',
-                                    folder])
-                            return None
-                            
-                            try:
-                                import subprocess
-                                subprocess.Popen([
-                                    'xdg-open',
-                                    folder])
-                                return None
-                            except Exception:
-                                e = None
-                                self._log(f'''Erreur ouverture dossier : {e}''', 'error')
-
-                            e = None
-                            del e
-                            return None
-                            e = None
-                            del e
-
-
-
-                
-                def _copy_path():
-                    '''Copie le chemin du fichier dans le presse-papiers.'''
-                    self.root.clipboard_clear()
-                    self.root.clipboard_append(dest_path)
-                    self._log(f'''Chemin copié : {dest_path}''', 'info')
-                    messagebox.showinfo('Copié', f'''Chemin copié dans le presse-papiers :\n{dest_path}''')
-
-                tk.Button(btn_frame, text = '📂 Ouvrir le dossier', font = ('Arial', 10, 'bold'), bg = COLORS['accent_yellow'], fg = 'black', activebackground = '#ffca28', activeforeground = 'black', relief = 'flat', padx = 10, pady = 5, cursor = 'hand2', command = _open_folder).pack(side = tk.LEFT, padx = (0, 5))
-                tk.Button(btn_frame, text = '📋 Copier le chemin', font = ('Arial', 10), bg = COLORS['bg_light'], fg = COLORS['accent_cyan'], activebackground = COLORS['accent_cyan'], activeforeground = 'black', relief = 'flat', padx = 10, pady = 5, cursor = 'hand2', command = _copy_path).pack(side = tk.LEFT, padx = (0, 5))
-                tk.Button(btn_frame, text = 'Fermer', font = ('Arial', 10), bg = COLORS['bg_light'], fg = COLORS['text_primary'], relief = 'flat', padx = 15, pady = 5, cursor = 'hand2', command = win.destroy).pack(side = tk.RIGHT)
-                self._log(f'''📧 Fichier prêt pour Winlink : {dest_path}''', 'success')
-                return None
-            except Exception:
-                dest_path = psdi_path
-
-            continue
-
-        
-        def _do_decompress(self):
-            '''Lance la décompression .psdi → PDF.'''
-            if not self._busy or PDF_TRANS_AVAILABLE:
-                pass
-            return None
-            psdi_path = self.var_psdi_path.get()
-            if not psdi_path or os.path.exists(psdi_path):
-                messagebox.showwarning('Attention', 'Sélectionnez un fichier .psdi valide.')
-            return None
-            base_name = os.path.splitext(os.path.basename(psdi_path))[0]
-            default_name = f'''{base_name}_recomposé.pdf'''
-            output_path = filedialog.asksaveasfilename(title = 'Enregistrer le PDF recomposé', initialfile = default_name, defaultextension = '.pdf', filetypes = [
-                ('Documents PDF', '*.pdf'),
-                ('Tous', '*.*')])
-            if not output_path:
-                pass
-            return None
-            self._busy = True
-            self.btn_decompress.config(state = tk.DISABLED, text = '⏳ Recomposition en cours...')
-            self.btn_open_pdf.pack_forget()
-            self._last_pdf_path = None
-            self._log(f'''Recomposition : {os.path.basename(psdi_path)}''')
-            
-            def progress_cb(step, total, msg):
-                self.root.after(0, (lambda m = msg: self.var_decompress_status.set(m)))
-                self.root.after(0, (lambda m = msg: self._log(m)))
-
-            
-            def _thread():
-                
-                try:
-                    f = open(psdi_path, 'rb')
-                    archive_data = f.read()
-                    
-                    try:
-                        None(None, None)
-                        (pdf_bytes, info) = pdf_trans.archive_to_pdf(archive_data, output_path = output_path, progress_callback = progress_cb)
-                        pdf_size = len(pdf_bytes)
-                        arch_size = len(archive_data)
-                        
-                        def _done():
-                            self._busy = False
-                            self.btn_decompress.config(state = tk.NORMAL, text = '📬  RECOMPOSER  →  .pdf')
-                            self.var_decompress_status.set(f'''✅ {os.path.basename(output_path)} — {pdf_size:,} octets''')
-                            self._log(f'''✅ Recomposé : {arch_size:,} → {pdf_size:,} octets''', 'success')
-                            self._log(f'''   Fichier : {output_path}''', 'success')
-                            self._last_pdf_path = output_path
-                            self.btn_open_pdf.pack(fill = tk.X, pady = (5, 0))
-
-                        self.root.after(0, _done)
-                        return None
-                        with None:
-                            if not None:
-                                pass
-                        
-                        try:
-                            continue
-                        except Exception:
-                            e = None
-                            
-                            def _err():
-                                self._busy = False
-                                self.btn_decompress.config(state = tk.NORMAL, text = '📬  RECOMPOSER  →  .pdf')
-                                self.var_decompress_status.set(f'''❌ Erreur : {e}''')
-                                self._log(f'''Erreur recomposition : {e}''', 'error')
-
-                            self.root.after(0, _err)
-
-                        e = None
-                        del e
-                        return None
-                        e = None
-                        del e
-
-
-
-            threading.Thread(target = _thread, daemon = True).start()
-
-        
-        def _open_last_pdf(self):
-            """Ouvre le dernier PDF recomposé avec l'application par défaut."""
-            if self._last_pdf_path:
-                if os.path.exists(self._last_pdf_path):
-                    
-                    try:
-                        if sys.platform == 'win32':
-                            os.startfile(self._last_pdf_path)
-                        elif sys.platform == 'darwin':
-                            import subprocess
-                            subprocess.Popen([
-                                'open',
-                                self._last_pdf_path])
-                        else:
-                            import subprocess
-                            subprocess.Popen([
-                                'xdg-open',
-                                self._last_pdf_path])
-                        self._log(f'''Ouverture : {self._last_pdf_path}''')
-                        return None
-                        return None
-                        return None
-                    except Exception:
-                        e = None
-                        self._log(f'''Erreur ouverture : {e}''', 'error')
-                        messagebox.showerror('Erreur', f'''Impossible d\'ouvrir le fichier :\n{e}''')
-
-                    e = None
-                    del e
-                    return None
-                    e = None
-                    del e
+        def __init__(self, job, parent = None):
+            super().__init__(parent)
+            self._job = job
 
         
         def run(self):
-            '''Lance la boucle principale Tkinter.'''
-            if not PDF_TRANS_AVAILABLE:
-                self._log('⚠️ pdf_trans.py non trouvé !', 'error')
-                self._log('   Placez pdf_trans.py dans le même répertoire', 'warning')
-                self._log('   Nécessite : pip install pymupdf Pillow', 'warning')
-            else:
-                self._log('PDF Teleporter prêt', 'success')
-                presets = pdf_trans.get_quality_presets()
-                for q, desc in presets.items():
-                    self._log(f'''  {q} : {desc}''')
-            self.root.mainloop()
+            
+            try:
+                self.result.emit(self._job(self._cb))
+                return None
+            except Exception:
+                exc = None
+                logger.error('Worker: %s\n%s', exc, traceback.format_exc())
+                self.error.emit(str(exc))
 
-        __static_attributes__ = ('_busy', '_last_pdf_path', '_last_psdi_path', 'btn_compress', 'btn_decompress', 'btn_open_pdf', 'btn_winlink', 'log_text', 'root', 'var_compress_status', 'var_decompress_status', 'var_estimates', 'var_mode', 'var_pdf_info', 'var_pdf_path', 'var_psdi_info', 'var_psdi_path', 'var_psdi_valid', 'var_quality')
+            exc = None
+            del exc
+            return None
+            exc = None
+            del exc
+
+        
+        def _cb(self, step, total, message):
+            
+            try:
+                if not step:
+                    step
+                if not total:
+                    total
+                self.progress.emit(int(0), int(0), str(message))
+                return None
+
+
+        __static_attributes__ = ('_job',)
+        __classcell__ = __class__
+        return __class__
+
+    
+    class LogWindow(QDialog):
+        __firstlineno__ = 390
+        
+        def __init__(self, parent = None):
+            super().__init__(parent)
+            self.setWindowTitle('📋 Journal — PDF Teleporter')
+            self.setWindowIcon(app_icon())
+            self.setWindowFlags(Qt.WindowType.Window)
+            self.setModal(False)
+            self.resize(820, 380)
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(10, 10, 10, 10)
+            lay.setSpacing(6)
+            self.text = QTextEdit()
+            self.text.setReadOnly(True)
+            lay.addWidget(self.text, 1)
+            row = QHBoxLayout()
+            b_copy = QPushButton('📋 Copier tout')
+            b_copy.clicked.connect(self._copy_all)
+            b_clear = QPushButton('🗑 Effacer')
+            b_clear.clicked.connect(self.text.clear)
+            b_close = QPushButton('Fermer')
+            b_close.clicked.connect(self.hide)
+            row.addWidget(b_copy)
+            row.addWidget(b_clear)
+            row.addStretch(1)
+            row.addWidget(b_close)
+            lay.addLayout(row)
+
+        
+        def _copy_all(self):
+            QGuiApplication.clipboard().setText(self.text.toPlainText())
+
+        
+        def append_html(self, html):
+            self.text.append(html)
+            bar = self.text.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+        
+        def show_and_raise(self):
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+        __static_attributes__ = ('text',)
+        __classcell__ = __class__
+        return __class__
+
+    
+    class AboutDialog(QDialog):
+        __firstlineno__ = 443
+        
+        def __init__(self, parent = None):
+            super().__init__(parent)
+            self.setWindowTitle('À propos — PDF Teleporter')
+            self.setWindowIcon(app_icon())
+            self.setFixedSize(540, 560)
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(24, 16, 24, 16)
+            title = QLabel('📄  PDF Teleporter')
+            title.setObjectName('h1')
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(title)
+            sub = QLabel(f'''version {VERSION} — août 2026''')
+            sub.setObjectName('version')
+            sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(sub)
+            line = QFrame()
+            line.setObjectName('accentLine')
+            line.setFixedHeight(2)
+            lay.addWidget(line)
+            lay.addSpacing(8)
+            body = QLabel('Un outil de Téléportation de document PDF :\n\nCompression de documents PDF (SITREP, PSD, BSD, ORSEC,\nFICHES REFLEXES) pour de la transmission via les modes\nradio TNC Packet et VARA Modem (HF/FM/SAT) de TCQ ou\nWinlink Express.\n\n• Les données texte, tableaux et images sont extraites du\n  PDF, compressées individuellement et transmises dans une\n  archive PSDI minimale.\n\n• Le fichier PSDI est recomposé côté réception avec sa mise\n  en forme originale (tableaux, images, textes) sans aucune\n  opération manuelle spécifique.\n\n• Les archives .psdi sont interopérables dans les deux sens\n  avec le module PDF de TCQ (format inchangé).')
+            body.setStyleSheet(f'''color: {COLORS['text_secondary']};''')
+            lay.addWidget(body)
+            lay.addStretch(1)
+            engine = getattr(psdi_lib, 'PSDI_LIB_VERSION', '?') if PSDI_AVAILABLE else 'indisponible'
+            fmt = getattr(psdi_lib, 'PDF_TRANS_VERSION', '?') if PSDI_AVAILABLE else '-'
+            tech = QLabel(f'''Interface : PyQt6   •   Moteur : psdi_lib v{engine}\nFormat d\'archive PSDI : v{fmt}   •   Python {sys.version.split()[0]}''')
+            tech.setObjectName('fileInfo')
+            tech.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(tech)
+            sep = QFrame()
+            sep.setObjectName('hline')
+            sep.setFixedHeight(1)
+            lay.addWidget(sep)
+            author = QLabel('Développé par F1GBD (Jean-Louis Naudin)\nADRASEC 77 — Sécurité Civile — FNRASEC')
+            author.setStyleSheet(f'''color: {COLORS['accent_cyan']}; font-family: Consolas, monospace;''')
+            author.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(author)
+            btn = QPushButton('Fermer')
+            btn.clicked.connect(self.accept)
+            row = QHBoxLayout()
+            row.addStretch(1)
+            row.addWidget(btn)
+            row.addStretch(1)
+            lay.addLayout(row)
+
+        __static_attributes__ = ()
+        __classcell__ = __class__
+        return __class__
+
+    
+    class WinlinkDialog(QDialog):
+        __firstlineno__ = 511
+        
+        def __init__(self, psdi_path, parent = None):
+            super().__init__(parent)
+            self._path = psdi_path
+            self.setWindowTitle('📧 Envoi via Winlink Express')
+            self.setWindowIcon(app_icon())
+            self.setMinimumSize(540, 560)
+            size = os.path.getsize(psdi_path)
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(18, 14, 18, 14)
+            title = QLabel('📧  Envoi via Winlink Express')
+            title.setStyleSheet(f'''color: {COLORS['accent_yellow']}; font-family: Consolas, monospace; font-size: 13pt; font-weight: bold;''')
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(title)
+            info = QLabel(f'''📎 {os.path.basename(psdi_path)}\n{human_size(size)}''')
+            info.setObjectName('fileInfo')
+            info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(info)
+            if size > 120000:
+                warn = QLabel('⚠️ Taille > 120 Ko — peut dépasser la limite Winlink !\nUtilisez la qualité Ultra Low ou SANS IMAGE.')
+                warn.setStyleSheet(f'''color: {COLORS['warning']}; font-weight: bold;''')
+            else:
+                warn = QLabel('✅ Taille OK pour Winlink (limite 120 Ko)')
+                warn.setStyleSheet(f'''color: {COLORS['success']};''')
+            warn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(warn)
+            line = QFrame()
+            line.setObjectName('accentLine')
+            line.setFixedHeight(2)
+            lay.addWidget(line)
+            steps = QTextEdit()
+            steps.setReadOnly(True)
+            steps.setPlainText(f'''📋  Procédure d\'envoi :\n\n1.  Ouvrez Winlink Express\n\n2.  Cliquez sur  Message → New Message...\n\n3.  Remplissez le destinataire (indicatif)\n\n4.  Sujet suggéré :  [PSDI] nom_du_document\n\n5.  Cliquez sur  Attachments → Add\n     Sélectionnez le fichier :\n     📂 {psdi_path}\n\n6.  Dans le corps du message, indiquez :\n     « Recomposer avec PDF Teleporter »\n\n7.  Cliquez  Post to Outbox\n\n8.  Envoyez via  VARA HF / FM / Packet / Telnet''')
+            lay.addWidget(steps, 1)
+            row = QHBoxLayout()
+            b_folder = QPushButton('📂 Ouvrir le dossier')
+            b_folder.setObjectName('primaryYellow')
+            b_folder.clicked.connect((lambda : open_with_system(os.path.dirname(self._path))))
+            b_copy = QPushButton('📋 Copier le chemin')
+            b_copy.clicked.connect(self._copy_path)
+            b_close = QPushButton('Fermer')
+            b_close.clicked.connect(self.accept)
+            row.addWidget(b_folder)
+            row.addWidget(b_copy)
+            row.addStretch(1)
+            row.addWidget(b_close)
+            lay.addLayout(row)
+
+        
+        def _copy_path(self):
+            QGuiApplication.clipboard().setText(self._path)
+            QMessageBox.information(self, 'Copié', f'''Chemin copié dans le presse-papiers :\n{self._path}''')
+
+        __static_attributes__ = ('_path',)
+        __classcell__ = __class__
+        return __class__
+
+    
+    class PDFTeleporterWindow(QMainWindow):
+        __firstlineno__ = 586
+        
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle(f'''📄 PDF Teleporter v{VERSION} — par F1GBD ADRASEC 77''')
+            self.setWindowIcon(app_icon())
+            self.setMinimumSize(880, 560)
+            self.setAcceptDrops(True)
+            self._busy = False
+            self._worker = None
+            self._est_worker = None
+            self._est_token = 0
+            self._last_psdi_path = None
+            self._last_pdf_path = None
+            self.log_window = LogWindow(self)
+            self._build_ui()
+            self._restore_geometry()
+            QShortcut(QKeySequence('Ctrl+J'), self, activated = self._toggle_log)
+            self._est_timer = QTimer(self)
+            self._est_timer.setSingleShot(True)
+            self._est_timer.setInterval(450)
+            self._est_timer.timeout.connect(self._update_estimates)
+            self._startup_banner()
+
+        
+        def _build_ui(self):
+            central = QWidget()
+            self.setCentralWidget(central)
+            root = QVBoxLayout(central)
+            root.setContentsMargins(10, 8, 10, 6)
+            root.setSpacing(6)
+            root.addLayout(self._build_header())
+            panels = QWidget()
+            center = QHBoxLayout(panels)
+            center.setContentsMargins(0, 0, 0, 0)
+            center.setSpacing(10)
+            center.addWidget(self._build_compress_panel(), 1)
+            center.addWidget(self._build_decompress_panel(), 1)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(panels)
+            root.addWidget(scroll, 1)
+            root.addLayout(self._build_footer())
+
+        
+        def _build_header(self):
+            row = QHBoxLayout()
+            title = QLabel('📄  PDF TELEPORTER')
+            title.setObjectName('h1')
+            row.addWidget(title)
+            ver = QLabel(f'''v{VERSION}''')
+            ver.setObjectName('version')
+            row.addWidget(ver)
+            self.btn_log = QPushButton('📋 JOURNAL')
+            self.btn_log.setToolTip('Ouvrir le journal dans une fenêtre séparée (Ctrl+J)')
+            self.btn_log.setStyleSheet(f'''color: {COLORS['accent_cyan']}; font-weight: bold;''')
+            self.btn_log.clicked.connect(self._toggle_log)
+            row.addWidget(self.btn_log)
+            btn_about = QPushButton('ℹ️ À PROPOS')
+            btn_about.setStyleSheet(f'''color: {COLORS['accent_yellow']}; font-weight: bold;''')
+            btn_about.clicked.connect((lambda : AboutDialog(self).exec()))
+            row.addWidget(btn_about)
+            row.addStretch(1)
+            if PSDI_AVAILABLE:
+                st = QLabel(f'''✅ psdi_lib v{getattr(psdi_lib, 'PSDI_LIB_VERSION', '?')} chargé''')
+                st.setObjectName('statusOk')
+            else:
+                st = QLabel('❌ psdi_lib manquant')
+                st.setObjectName('statusKo')
+            row.addWidget(st)
+            return row
+
+        
+        def _build_compress_panel(self):
+            box = QGroupBox('  📦  COMPACTER  (PDF → .psdi)  ')
+            box.setObjectName('panelCompress')
+            lay = QVBoxLayout(box)
+            lay.setSpacing(5)
+            lay.addWidget(QLabel('Fichier PDF :'))
+            row = QHBoxLayout()
+            self.ed_pdf = QLineEdit()
+            self.ed_pdf.setReadOnly(True)
+            self.ed_pdf.setPlaceholderText('Glissez un PDF ici ou cliquez sur Parcourir…')
+            b = QPushButton('📂 Parcourir')
+            b.setObjectName('browseBlue')
+            b.clicked.connect(self._browse_pdf)
+            row.addWidget(self.ed_pdf, 1)
+            row.addWidget(b)
+            lay.addLayout(row)
+            self.lb_pdf_info = QLabel('Aucun fichier sélectionné')
+            self.lb_pdf_info.setObjectName('fileInfo')
+            lay.addWidget(self.lb_pdf_info)
+            t = QLabel('Qualité de compression :')
+            t.setObjectName('sectionTitle')
+            lay.addWidget(t)
+            self.grp_quality = QButtonGroup(self)
+            for key in ('ultra_low', 'low', 'medium', 'high', 'fast'):
+                (label, desc) = QUALITY_LABELS[key]
+                r = QHBoxLayout()
+                r.setSpacing(4)
+                rb = QRadioButton(label)
+                rb.setProperty('value', key)
+                rb.setStyleSheet('font-weight: bold;')
+                rb.setChecked(key == 'medium')
+                rb.toggled.connect(self._on_option_changed)
+                self.grp_quality.addButton(rb)
+                hint = QLabel(desc)
+                hint.setObjectName('radioHint')
+                r.addWidget(rb)
+                r.addWidget(hint)
+                r.addStretch(1)
+                lay.addLayout(r)
+            t2 = QLabel('Mode :')
+            t2.setObjectName('sectionTitle')
+            lay.addWidget(t2)
+            self.grp_mode = QButtonGroup(self)
+            for key, label in MODE_LABELS.items():
+                rb = QRadioButton(label)
+                rb.setProperty('value', key)
+                rb.setChecked(key == 'struct')
+                rb.toggled.connect(self._on_option_changed)
+                self.grp_mode.addButton(rb)
+                lay.addWidget(rb)
+            self.tx_estimates = QTextEdit()
+            self.tx_estimates.setObjectName('estimates')
+            self.tx_estimates.setReadOnly(True)
+            self.tx_estimates.setMinimumHeight(74)
+            self.tx_estimates.setMaximumHeight(220)
+            self.tx_estimates.setPlainText('Sélectionnez un PDF pour voir les estimations')
+            lay.addWidget(self.tx_estimates, 1)
+            self.btn_compress = QPushButton('📦  COMPACTER  →  .psdi')
+            self.btn_compress.setObjectName('primaryCyan')
+            self.btn_compress.setEnabled(False)
+            self.btn_compress.clicked.connect(self._do_compress)
+            lay.addWidget(self.btn_compress)
+            self.pb_compress = QProgressBar()
+            self.pb_compress.setRange(0, 100)
+            self.pb_compress.setValue(0)
+            self.pb_compress.setVisible(False)
+            lay.addWidget(self.pb_compress)
+            self.lb_compress_status = QLabel('')
+            self.lb_compress_status.setStyleSheet(f'''color: {COLORS['accent_green']}; font-size: 9pt;''')
+            self.lb_compress_status.setWordWrap(True)
+            lay.addWidget(self.lb_compress_status)
+            self.btn_winlink = QPushButton('📧  Préparer pour Winlink')
+            self.btn_winlink.setObjectName('primaryYellow')
+            self.btn_winlink.setEnabled(False)
+            self.btn_winlink.clicked.connect(self._do_winlink)
+            lay.addWidget(self.btn_winlink)
+            return box
+
+        
+        def _build_decompress_panel(self):
+            box = QGroupBox('  📬  RECOMPOSER  (.psdi → PDF)  ')
+            box.setObjectName('panelDecompress')
+            lay = QVBoxLayout(box)
+            lay.setSpacing(5)
+            lay.addWidget(QLabel('Fichier .psdi reçu :'))
+            row = QHBoxLayout()
+            self.ed_psdi = QLineEdit()
+            self.ed_psdi.setReadOnly(True)
+            self.ed_psdi.setPlaceholderText('Glissez une archive .psdi ici…')
+            b = QPushButton('📂 Parcourir')
+            b.setObjectName('browseGreen')
+            b.clicked.connect(self._browse_psdi)
+            row.addWidget(self.ed_psdi, 1)
+            row.addWidget(b)
+            lay.addLayout(row)
+            self.lb_psdi_info = QLabel('Aucun fichier sélectionné')
+            self.lb_psdi_info.setObjectName('fileInfo')
+            lay.addWidget(self.lb_psdi_info)
+            self.lb_psdi_valid = QLabel('')
+            self.lb_psdi_valid.setStyleSheet(f'''color: {COLORS['accent_green']}; font-family: Consolas, monospace;''')
+            self.lb_psdi_valid.setWordWrap(True)
+            lay.addWidget(self.lb_psdi_valid)
+            sep = QFrame()
+            sep.setObjectName('hline')
+            sep.setFixedHeight(1)
+            lay.addWidget(sep)
+            hint = QLabel("Le fichier .psdi sera décompressé et\nrecomposé en document PDF.\n\nLe PDF résultant contiendra le texte et\nles images compressées de l'original.\n\nModes supportés :\n  • Structuré (texte + images repositionnées)\n  • Rendu image (pages en JPEG)")
+            hint.setObjectName('hint')
+            lay.addWidget(hint)
+            lay.addStretch(1)
+            self.btn_decompress = QPushButton('📬  RECOMPOSER  →  .pdf')
+            self.btn_decompress.setObjectName('primaryGreen')
+            self.btn_decompress.setEnabled(False)
+            self.btn_decompress.clicked.connect(self._do_decompress)
+            lay.addWidget(self.btn_decompress)
+            self.pb_decompress = QProgressBar()
+            self.pb_decompress.setRange(0, 100)
+            self.pb_decompress.setValue(0)
+            self.pb_decompress.setVisible(False)
+            lay.addWidget(self.pb_decompress)
+            self.lb_decompress_status = QLabel('')
+            self.lb_decompress_status.setStyleSheet(f'''color: {COLORS['accent_cyan']}; font-size: 9pt;''')
+            self.lb_decompress_status.setWordWrap(True)
+            lay.addWidget(self.lb_decompress_status)
+            self.btn_open_pdf = QPushButton('📂  Ouvrir le PDF recomposé')
+            self.btn_open_pdf.setStyleSheet(f'''color: {COLORS['accent_yellow']}; font-weight: bold;''')
+            self.btn_open_pdf.setVisible(False)
+            self.btn_open_pdf.clicked.connect(self._open_last_pdf)
+            lay.addWidget(self.btn_open_pdf)
+            return box
+
+        
+        def _build_footer(self):
+            row = QHBoxLayout()
+            self.lb_last = QLabel('Téléportation de PDF par Radio')
+            self.lb_last.setObjectName('footer')
+            self.lb_last.setToolTip('Dernier message — cliquez sur 📋 JOURNAL pour tout voir')
+            b = QLabel('F1GBD — ADRASEC 77 — FNRASEC')
+            b.setObjectName('footer')
+            row.addWidget(self.lb_last, 1)
+            row.addWidget(b)
+            return row
+
+        
+        def _toggle_log(self):
+            if self.log_window.isVisible():
+                self.log_window.hide()
+            return None
+            self.log_window.show_and_raise()
+
+        
+        def _restore_geometry(self):
+            screen = QGuiApplication.primaryScreen()
+            if not screen is not None:
+                self.resize(980, 700)
+            return None
+            avail = screen.availableGeometry()
+            w = min(max(880, avail.width() - 60), avail.width())
+            h = min(max(560, min(900, avail.height() - 60)), avail.height())
+            self.resize(w, h)
+            self.move(avail.x() + (avail.width() - w) // 2, avail.y() + max(0, (avail.height() - h) // 2))
+
+        
+        def _log(self, msg, level = 'info'):
+            color = {
+                'info': COLORS['text_secondary'],
+                'success': COLORS['success'],
+                'warning': COLORS['warning'],
+                'error': COLORS['error'] }.get(level, COLORS['text_secondary'])
+            ts = datetime.now().strftime('%H:%M:%S')
+            safe = msg.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            self.log_window.append_html(f'''<span style="color:{COLORS['text_dim']}">[{ts}]</span> <span style="color:{color}">{safe}</span>''')
+            one_line = ' '.join(msg.split())
+            if len(one_line) > 120:
+                pass
+            one_line = one_line[:117] + '…'
+            self.lb_last.setText(f'''[{ts}] {one_line}''')
+            self.lb_last.setStyleSheet(f'''color: {color}; font-size: 8pt;''')
+
+        
+        def _startup_banner(self):
+            if not PSDI_AVAILABLE:
+                self._log('⚠️ psdi_lib.py non trouvé ou non chargeable !', 'error')
+                if PSDI_ERROR:
+                    pass
+                self._log(f'''   {PSDI_ERROR}''', 'error')
+                self._log('   Placez psdi_lib.py dans le même répertoire', 'warning')
+                self._log('   Nécessite : pip install PyQt6 pymupdf Pillow', 'warning')
+            return None
+            self._log(f'''PDF Teleporter v{VERSION} prêt (PyQt6)''', 'success')
+            
+            try:
+                for q, desc in psdi_lib.get_quality_presets().items():
+                    self._log(f'''  {q} : {desc}''')
+                return None
+
+
+        
+        def dragEnterEvent(self, event):
+            if event.mimeData().hasUrls():
+                for url in event.mimeData().urls():
+                    if not url.toLocalFile().lower().endswith(('.pdf', '.psdi')):
+                        continue
+                    event.acceptProposedAction()
+                    event.mimeData().urls()
+                    return None
+            event.ignore()
+
+        
+        def dropEvent(self, event):
+            for url in event.mimeData().urls():
+                path = url.toLocalFile()
+                low = path.lower()
+                if low.endswith('.pdf'):
+                    self.load_pdf(path)
+                    event.acceptProposedAction()
+                    event.mimeData().urls()
+                return None
+                if not low.endswith('.psdi'):
+                    continue
+                self.load_psdi(path)
+                event.acceptProposedAction()
+                return None
+            event.ignore()
+
+        
+        def _browse_pdf(self):
+            (path, _) = QFileDialog.getOpenFileName(self, 'Sélectionner un document PDF', '', 'Documents PDF (*.pdf);;Tous les fichiers (*.*)')
+            if path:
+                self.load_pdf(path)
+            return None
+
+        
+        def load_pdf(self, path):
+            if not os.path.exists(path):
+                pass
+            return None
+            self.ed_pdf.setText(path)
+            size = os.path.getsize(path)
+            self.lb_pdf_info.setText(f'''📎 {os.path.basename(path)}  —  {human_size(size)}''')
+            if PSDI_AVAILABLE:
+                PSDI_AVAILABLE
+            self.btn_compress.setEnabled(not (self._busy))
+            self._log(f'''PDF sélectionné : {os.path.basename(path)} ({human_size(size)})''')
+            self._on_option_changed()
+
+        
+        def _browse_psdi(self):
+            (path, _) = QFileDialog.getOpenFileName(self, 'Sélectionner une archive .psdi', '', 'Archives PSDI (*.psdi);;Tous les fichiers (*.*)')
+            if path:
+                self.load_psdi(path)
+            return None
+
+        
+        def load_psdi(self, path):
+            if not os.path.exists(path):
+                pass
+            return None
+            self.ed_psdi.setText(path)
+            size = os.path.getsize(path)
+            self.lb_psdi_info.setText(f'''📎 {os.path.basename(path)}  —  {human_size(size)}''')
+            self._log(f'''Archive sélectionnée : {os.path.basename(path)} ({human_size(size)})''')
+            self.btn_open_pdf.setVisible(False)
+            self._last_pdf_path = None
+            if not PSDI_AVAILABLE:
+                self.lb_psdi_valid.setText('⚠️ psdi_lib manquant — validation impossible')
+                self.btn_decompress.setEnabled(False)
+            return None
+            
+            try:
+                fh = open(path, 'rb')
+                data = fh.read()
+                
+                try:
+                    None(None, None)
+                    result = psdi_lib.validate_archive(data)
+                    if result.get('valid'):
+                        ver = result.get('version', '?')
+                        crc = '✅ CRC OK' if result.get('checksum_ok') else '⚠️ CRC invalide'
+                        if ver == 1:
+                            pass
+                        elif ver == 2:
+                            pass
+                        
+                        mode = f'''v{ver}'''
+                        self.lb_psdi_valid.setText(f'''✅ Archive valide — Mode : {mode} — {crc}''')
+                        self.lb_psdi_valid.setStyleSheet(f'''color: {COLORS['accent_green']}; font-family: Consolas, monospace;''')
+                        self.btn_decompress.setEnabled(not (self._busy))
+                    return None
+                    
+                    try:
+                        err = result.get('error', 'Inconnue')
+                        self.lb_psdi_valid.setText(f'''❌ Archive invalide : {err}''')
+                        self.lb_psdi_valid.setStyleSheet(f'''color: {COLORS['error']}; font-family: Consolas, monospace;''')
+                        self.btn_decompress.setEnabled(False)
+                        self._log(f'''Archive invalide : {err}''', 'error')
+                        return None
+                        with None:
+                            if not 'Image':
+                                pass
+                        'Structuré'
+                        
+                        try:
+                            continue
+                        except Exception:
+                            exc = None
+                            self.lb_psdi_valid.setText(f'''❌ Erreur lecture : {exc}''')
+                            self.lb_psdi_valid.setStyleSheet(f'''color: {COLORS['error']}; font-family: Consolas, monospace;''')
+                            self.btn_decompress.setEnabled(False)
+                            self._log(f'''Erreur lecture archive : {exc}''', 'error')
+
+                        exc = None
+                        del exc
+                        return None
+                        exc = None
+                        del exc
+
+
+
+
+        
+        def _selected_quality(self):
+            btn = self.grp_quality.checkedButton()
+            if btn:
+                pass
+            return btn.property('value')
+            return 'medium'
+
+        
+        def _selected_mode(self):
+            btn = self.grp_mode.checkedButton()
+            if btn:
+                pass
+            return btn.property('value')
+            return 'struct'
+
+        
+        def _on_option_changed(self, checked = True):
+            if not checked:
+                pass
+            return None
+            if self.ed_pdf.text():
+                if PSDI_AVAILABLE:
+                    if not self._busy:
+                        self._est_timer.start()
+                    return None
+                return None
+            return None
+
+        
+        def _update_estimates(self):
+            path = self.ed_pdf.text()
+            if path and os.path.exists(path) and PSDI_AVAILABLE or self._busy:
+                pass
+            return None
+            quality = self._selected_quality()
+            mode = self._selected_mode()
+            actual_quality = 'ultra_low' if quality == 'fast' else quality
+            skip_img = quality == 'fast'
+            self._est_token = self, self._est_token += 1, ._est_token
+            self.tx_estimates.setPlainText('⏳ Calcul des estimations…')
+            
+            def job(_cb):
+                (_, info) = psdi_lib.pdf_to_archive(path, quality = actual_quality, mode = mode, skip_images = skip_img)
+                return info
+
+            worker = Worker(job, self)
+            
+            def on_result(info):
+                if token != self._est_token:
+                    pass
+                return None
+                arch = info['archive_size']
+                ratio = info['ratio_percent']
+                if not info.get('estimates', { }):
+                    info.get('estimates', { })
+                est = { }
+                
+                try:
+                    frags = psdi_lib.get_transfer_info(arch).get('tnc_fragments', '?')
+                    lines = [
+                        f'''Archive : {human_size(arch)} — {ratio}% de l\'original''',
+                        f'''Fragments TNC : {frags} trames''',
+                        '']
+                    for n, d in :
+                        pass
+                    
+                    lines += est.items(), []
+                    self.tx_estimates.setPlainText('\n'.join(lines))
+                    return None
+                except Exception:
+                    frags = '?'
+
+                continue
+                
+
+            
+            def on_error(msg):
+                if token == self._est_token:
+                    self.tx_estimates.setPlainText(f'''Erreur : {msg}''')
+                return None
+
+            worker.result.connect(on_result)
+            worker.error.connect(on_error)
+            worker.finished.connect(worker.deleteLater)
+            self._est_worker = worker
+            worker.start()
+
+        
+        def _set_busy(self, busy):
+            self._busy = busy
+            if not busy:
+                not busy
+                if PSDI_AVAILABLE:
+                    PSDI_AVAILABLE
+            self.btn_compress.setEnabled(bool(self.ed_pdf.text()))
+            if not busy:
+                not busy
+                if PSDI_AVAILABLE:
+                    PSDI_AVAILABLE
+                    if bool(self.ed_psdi.text()):
+                        bool(self.ed_psdi.text())
+            self.btn_decompress.setEnabled(self.lb_psdi_valid.text().startswith('✅'))
+
+        
+        def _do_compress(self):
+            if not self._busy or PSDI_AVAILABLE:
+                pass
+            return None
+            pdf_path = self.ed_pdf.text()
+            if not pdf_path or os.path.exists(pdf_path):
+                QMessageBox.warning(self, 'Attention', 'Sélectionnez un fichier PDF valide.')
+            return None
+            quality = self._selected_quality()
+            mode = self._selected_mode()
+            actual_quality = 'ultra_low' if quality == 'fast' else quality
+            skip_img = quality == 'fast'
+            base = os.path.splitext(os.path.basename(pdf_path))[0]
+            suggested = os.path.join(os.path.dirname(pdf_path), f'''{base}_{quality}.psdi''')
+            (output_path, _) = QFileDialog.getSaveFileName(self, "Enregistrer l'archive compactée", suggested, 'Archives PSDI (*.psdi);;Tous les fichiers (*.*)')
+            if not output_path:
+                pass
+            return None
+            self._set_busy(True)
+            self.btn_compress.setText('⏳ Compression en cours…')
+            self.pb_compress.setValue(0)
+            self.pb_compress.setVisible(True)
+            self._log(f'''Compression : {os.path.basename(pdf_path)} → qualité={quality}, mode={mode}''')
+            
+            def job(cb):
+                return psdi_lib.pdf_to_archive(pdf_path, quality = actual_quality, mode = mode, output_path = output_path, progress_callback = cb, skip_images = skip_img)[1]
+
+            worker = Worker(job, self)
+            worker.progress.connect((lambda s, t, m: self._on_progress(self.pb_compress, self.lb_compress_status, s, t, m)))
+            
+            def on_result(info):
+                orig = info['original_size']
+                arch = info['archive_size']
+                ratio = info['ratio_percent']
+                elapsed = info.get('compression_time', 0)
+                factor = orig / arch if arch else 0
+                self.pb_compress.setValue(100)
+                self.lb_compress_status.setText(f'''✅ {os.path.basename(output_path)} — {arch:,} octets ({ratio}%) en {elapsed:.1f}s'''.replace(',', ' '))
+                self._log(f'''✅ Compacté : {orig:,} → {arch:,} octets ({ratio}%, ×{factor:.1f}) en {elapsed:.1f}s''', 'success')
+                self._log(f'''   Fichier : {output_path}''', 'success')
+                self._last_psdi_path = output_path
+                self.btn_winlink.setEnabled(True)
+                self._finish_compress()
+
+            
+            def on_error(msg):
+                self.pb_compress.setVisible(False)
+                self.lb_compress_status.setText(f'''❌ Erreur : {msg}''')
+                self._log(f'''Erreur compression : {msg}''', 'error')
+                self._finish_compress()
+
+            worker.result.connect(on_result)
+            worker.error.connect(on_error)
+            worker.finished.connect(worker.deleteLater)
+            self._worker = worker
+            worker.start()
+
+        
+        def _finish_compress(self):
+            self.btn_compress.setText('📦  COMPACTER  →  .psdi')
+            self._set_busy(False)
+
+        
+        def _do_decompress(self):
+            if not self._busy or PSDI_AVAILABLE:
+                pass
+            return None
+            psdi_path = self.ed_psdi.text()
+            if not psdi_path or os.path.exists(psdi_path):
+                QMessageBox.warning(self, 'Attention', 'Sélectionnez un fichier .psdi valide.')
+            return None
+            base = os.path.splitext(os.path.basename(psdi_path))[0]
+            suggested = os.path.join(os.path.dirname(psdi_path), f'''{base}_recomposé.pdf''')
+            (output_path, _) = QFileDialog.getSaveFileName(self, 'Enregistrer le PDF recomposé', suggested, 'Documents PDF (*.pdf);;Tous les fichiers (*.*)')
+            if not output_path:
+                pass
+            return None
+            self._set_busy(True)
+            self.btn_decompress.setText('⏳ Recomposition en cours…')
+            self.pb_decompress.setValue(0)
+            self.pb_decompress.setVisible(True)
+            self.btn_open_pdf.setVisible(False)
+            self._last_pdf_path = None
+            self._log(f'''Recomposition : {os.path.basename(psdi_path)}''')
+            fh = open(psdi_path, 'rb')
+            archive_data = fh.read()
+            None(None, None)
+            
+            def job(cb):
+                (pdf_bytes, info) = psdi_lib.archive_to_pdf(archive_data, output_path = output_path, progress_callback = cb)
+                return len(pdf_bytes)
+
+            worker = Worker(job, self)
+            worker.progress.connect((lambda s, t, m: self._on_progress(self.pb_decompress, self.lb_decompress_status, s, t, m)))
+            
+            def on_result(pdf_size):
+                self.pb_decompress.setValue(100)
+                self.lb_decompress_status.setText(f'''✅ {os.path.basename(output_path)} — {pdf_size:,} octets'''.replace(',', ' '))
+                self._log(f'''✅ Recomposé : {len(archive_data):,} → {pdf_size:,} octets''', 'success')
+                self._log(f'''   Fichier : {output_path}''', 'success')
+                self._last_pdf_path = output_path
+                self.btn_open_pdf.setVisible(True)
+                self._finish_decompress()
+
+            
+            def on_error(msg):
+                self.pb_decompress.setVisible(False)
+                self.lb_decompress_status.setText(f'''❌ Erreur : {msg}''')
+                self._log(f'''Erreur recomposition : {msg}''', 'error')
+                self._finish_decompress()
+
+            worker.result.connect(on_result)
+            worker.error.connect(on_error)
+            worker.finished.connect(worker.deleteLater)
+            self._worker = worker
+            worker.start()
+            return None
+            with None:
+                if not None:
+                    pass
+            continue
+
+        
+        def _finish_decompress(self):
+            self.btn_decompress.setText('📬  RECOMPOSER  →  .pdf')
+            self._set_busy(False)
+
+        
+        def _on_progress(self, bar, label, step, total, msg):
+            if total > 0:
+                bar.setRange(0, total)
+                bar.setValue(min(step, total))
+            else:
+                bar.setRange(0, 0)
+            label.setText(msg)
+            self._log(msg)
+
+        
+        def _do_winlink(self):
+            path = self._last_psdi_path
+            if not path or os.path.exists(path):
+                QMessageBox.warning(self, 'Attention', "Compactez d'abord un PDF avant de préparer un message Winlink.")
+            return None
+            dest = path
+            
+            try:
+                docs = os.path.join(os.path.expanduser('~'), 'Documents', 'PDFteleporter')
+                os.makedirs(docs, exist_ok = True)
+                candidate = os.path.join(docs, os.path.basename(path))
+                if os.path.abspath(path) != os.path.abspath(candidate):
+                    import shutil
+                shutil.copy2(path, candidate)
+                dest = candidate
+                self._log(f'''📧 Fichier prêt pour Winlink : {dest}''', 'success')
+                WinlinkDialog(dest, self).exec()
+                return None
+            except Exception:
+                exc = None
+                self._log(f'''Copie vers Documents impossible ({exc}) — chemin d\'origine utilisé''', 'warning')
+
+            exc = None
+            del exc
+            continue
+            exc = None
+            del exc
+
+        
+        def _open_last_pdf(self):
+            if self._last_pdf_path:
+                if os.path.exists(self._last_pdf_path):
+                    open_with_system(self._last_pdf_path)
+                    self._log(f'''Ouverture : {self._last_pdf_path}''')
+                return None
+            return None
+
+        
+        def closeEvent(self, event):
+            for w in (self._worker, self._est_worker):
+                if not w is not None:
+                    continue
+                if not w.isRunning():
+                    continue
+                w.requestInterruption()
+                w.wait(1500)
+            super().closeEvent(event)
+
+        __static_attributes__ = ('_busy', '_est_timer', '_est_token', '_est_worker', '_last_pdf_path', '_last_psdi_path', '_worker', 'btn_compress', 'btn_decompress', 'btn_log', 'btn_open_pdf', 'btn_winlink', 'ed_pdf', 'ed_psdi', 'grp_mode', 'grp_quality', 'lb_compress_status', 'lb_decompress_status', 'lb_last', 'lb_pdf_info', 'lb_psdi_info', 'lb_psdi_valid', 'log_window', 'pb_compress', 'pb_decompress', 'tx_estimates')
+        __classcell__ = __class__
+        return __class__
+
+    
+    def main():
+        QApplication.setApplicationName(APP_NAME)
+        QApplication.setApplicationVersion(VERSION)
+        QApplication.setOrganizationName(ORG_NAME)
+        app = QApplication(sys.argv)
+        app.setWindowIcon(app_icon())
+        app.setStyleSheet(QSS)
+        win = PDFTeleporterWindow()
+        win.show()
+        for arg in sys.argv[1:]:
+            if arg.lower().endswith('.psdi') and os.path.exists(arg):
+                win.load_psdi(arg)
+                sys.argv[1:]
+            return app.exec()
+            if not arg.lower().endswith('.pdf'):
+                continue
+            if not os.path.exists(arg):
+                continue
+            win.load_pdf(arg)
+            return app.exec()
+        return app.exec()
 
     if __name__ == '__main__':
-        app = PDFTeleporterApp()
-        app.run()
+        sys.exit(main())
     return None
     return None
-except ImportError:
-    logger.error('Manque le teleporteur')
+except Exception:
+    _exc = None
+    PSDI_ERROR = str(_exc)
+    logger.error('psdi_lib indisponible : %s', _exc)
 
+_exc = None
+del _exc
 continue
+_exc = None
+del _exc
