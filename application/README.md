@@ -17,11 +17,20 @@ le choix des deux modes d'encodage, les préréglages de qualité et l'essentiel
 des correctifs de rendu qui font que la recomposition ressemble au document
 d'origine sont son travail, pas le nôtre.
 
-L'original était distribué sous **GNU GPL v3** sous forme de binaire PyInstaller
-Windows, sans code source publié. La GPL v3 accorde explicitement le droit
-d'accéder au source correspondant et de modifier l'œuvre ; le source a donc été
-reconstitué depuis le bytecode livré, puis réécrit. Le dossier `reference/` de
-l'archive complète conserve ce matériel de reconstitution.
+L'original est distribué sous **GNU GPL v3** sous forme de binaire PyInstaller
+Windows, sans code source publié — la version 1.0.6 comme la 2.1.0 d'août 2026.
+La GPL v3 accorde explicitement le droit d'accéder au source correspondant et de
+modifier l'œuvre ; le source a donc été reconstitué depuis le bytecode livré,
+puis réécrit. Le dossier `reference/` de l'archive complète conserve ce matériel
+pour les deux versions : moteur `pdf_trans` 1.0.6 et `psdi_lib` 2.1.0, interface
+2.1.0, désassemblages et outils.
+
+L'original a lui-même évolué entre-temps. Ses versions 2.0.1 et 2.1.0 ont
+apporté une interface PyQt6, le glisser-déposer et l'estimation différée, un
+bundle allégé et une extraction du texte retouchée ; le moteur, lui, est à une
+fonction près le bytecode 1.0.6 (`reference/NOTES-EXTRACTION.md` détaille la
+comparaison). Quand ce document parle de « l'original », il s'agit de la 2.1.0 ;
+ce qui ne vaut que pour la 1.0.6 est signalé.
 
 Ce dérivé reste sous **GNU GPL v3**, comme l'exige la licence de l'original.
 PyMuPDF, utilisé par le moteur, est sous AGPL v3.
@@ -32,16 +41,23 @@ version émet, et réciproquement. Toutes les optimisations décrites plus bas o
 été retenues précisément parce qu'elles restent lisibles par un décodeur écrit
 sur la spécification d'origine.
 
+Cette compatibilité est vérifiée contre le vrai moteur de F1GBD, pas contre
+l'idée qu'on s'en fait : `reference/tools/bench.py` charge `psdi_lib` 2.1.0
+directement depuis son bytecode et fait recomposer chaque archive de chaque côté
+par chaque décodeur. Six documents de test, quatre préréglages, quatre sens :
+les 96 recompositions passent (`reference/bench/bench.json`).
+
 ## Périmètre
 
 Cet outil compresse et recompose, rien de plus. Il ne parle pas à la radio.
 
 L'émission est le travail de Winlink, avec VARA ou Direwolf selon la liaison :
 l'archive `.psdi` part en pièce jointe d'un message Winlink Express, et la
-station réceptrice la recompose avec ce même outil. Le moteur original de F1GBD
-comportait une couche de fragmentation TNC et de tramage VARA (`prepare_for_tnc`,
-`prepare_for_vara` et leurs réciproques) parce qu'il alimentait son application
-TCQ ; elle n'a pas été reprise, et ne le sera pas.
+station réceptrice la recompose avec ce même outil. Le moteur de F1GBD comporte
+— en 2.1.0 toujours — une couche de fragmentation TNC et de tramage VARA
+(`prepare_for_tnc`, `prepare_for_vara` et leurs réciproques) et un
+`PDFTransferManager`, parce qu'il alimente son application TCQ ; rien de cela
+n'a été repris, et ne le sera pas.
 
 Cette décision a une conséquence pratique : **la contrainte qui compte est la
 limite de pièce jointe Winlink**, pas le débit du modem. Les estimations de
@@ -83,6 +99,10 @@ un bulletin chargé de photographies, précisément quand savoir si le message
 passe sous la limite Winlink compte le plus. La mesure est différée de 450 ms :
 changer trois fois de qualité de suite ne lance qu'une compression, celle du
 réglage retenu.
+
+Ces trois comportements — glisser-déposer, estimation par compression réelle en
+arrière-plan, délai de 450 ms — existent aussi dans l'original 2.1.0 ; la 1.0.6
+estimait par coefficient.
 
 ### Menu contextuel de l'Explorateur
 
@@ -152,9 +172,10 @@ encodage Identity sans table ToUnicode — expose ses saisies sous forme
 d'identifiants de glyphes, pas de caractères. Le texte est perdu pour tout
 lecteur, PyMuPDF compris ; seuls les glyphes dessinés subsistent.
 
-L'heuristique de ligatures héritée de l'original transformait chaque glyphe
-non résolu en « ti » : `F4LTV` ressortait en `tititititi`, et le reste de la
-page étant parfait, rien ne signalait la perte. Le discriminant est simple : une
+L'heuristique de ligatures de l'original, avant sa version 2.1.0,
+transformait chaque glyphe non résolu en « ti » : `F4LTV` ressortait en
+`tititititi`, et le reste de la page étant parfait, rien ne signalait la perte.
+Le discriminant est simple : une
 ligature est un glyphe isolé dans un mot lisible, alors qu'une saisie perdue
 l'est en entier. La détection se fait **au niveau du dictionnaire de fontes**
 (sous-type Type0, encodage Identity, pas de ToUnicode) plutôt que sur les
@@ -177,6 +198,16 @@ l'archive reste lisible par tout décodeur du format. Le mode « texte seul » l
 conserve aussi — l'opérateur a choisi d'écarter les images, pas de perdre ses
 propres saisies. Le test de non-régression construit un vrai PDF privé de sa
 table ToUnicode plutôt qu'une simulation sur des chaînes.
+
+F1GBD a traité le même défaut dans sa version 2.1.0, par un autre chemin : son
+extraction passe désormais le drapeau `TEXTFLAGS_DICT`, dont
+`CID_FOR_UNKNOWN_UNICODE` fait sortir les glyphes non résolus en identifiants
+bruts plutôt qu'en U+FFFD, et la substitution `ti`/`tt` n'est plus tentée
+qu'entre deux minuscules. Un indicatif n'est donc plus maquillé en mot : il
+ressort tel quel, `)\x17/79`. Le texte reste perdu, puisque rien dans le PDF ne
+permet de le retrouver — c'est précisément pourquoi il est rastérisé ici. Le
+banc de mesure le montre sur le PDF de test privé de ToUnicode : son archive
+pèse 347 octets, la saisie absente ; la nôtre 1 098, la saisie présente.
 
 ### Images en entrée
 
@@ -244,7 +275,10 @@ visible en réception :
 - **Ligatures LibreOffice.** LibreOffice écrit les ligatures `ti` et `tt` en
   points de code non standard (U+019F, U+01A9) qui arrivent en caractères de
   remplacement. Elles sont décomposées à l'extraction ; là où le glyphe est déjà
-  perdu, la substitution est déduite du contexte.
+  perdu, la substitution est déduite du contexte. La 2.1.0 de l'original
+  restreint cette déduction au glyphe encadré de deux minuscules ; ici elle est
+  réservée au glyphe isolé dans un mot lisible, un fragment majoritairement
+  perdu étant rastérisé (voir plus haut).
 - **Tracés multi-segments.** La chaîne PDF de Microsoft dessine les cadres en
   chemins multi-segments. Prendre la boîte englobante globale d'un chemin plutôt
   que de parcourir ses sous-éléments peint un rectangle noir pleine page.
@@ -263,15 +297,15 @@ visible en réception :
 
 ### Architecture
 
-| Original | Ici |
+| Original 2.1.0 | Ici |
 |---|---|
-| Tkinter | PyQt6, style Fusion forcé |
-| Moteur et IHM en deux fichiers monolithiques | Moteur séparé (`format` / `engine` / `presets`), IHM isolée |
-| Pas de ligne de commande | CLI headless complet |
+| PyQt6, feuille de style sombre fixe (Tkinter jusqu'en 1.0.6) | PyQt6, style Fusion suivant le réglage clair/sombre du système |
+| Moteur et IHM en deux fichiers monolithiques (`psdi_lib`, `PDFteleporter`) | Moteur séparé (`format` / `engine` / `presets`), IHM isolée |
+| Un chemin passé en argument ouvre l'IHM dessus ; aucune conversion sans fenêtre | CLI headless complet |
 | Un exécutable fenêtré | Deux : fenêtré (IHM) et console (CLI) |
-| Aucune intégration bureau | Menu contextuel Explorateur |
-| Pas d'installateur | Installateur Inno Setup 7 |
-| Pas d'icône ni de métadonnées | Icône multi-résolution et ressources de version |
+| Glisser-déposer, pas de menu contextuel | Glisser-déposer et menu contextuel Explorateur |
+| Archive 7z à décompresser | Installateur Inno Setup 7, ressources de version Windows |
+| Couche TNC/VARA et gestionnaire de transfert embarqués | Compression seule ; l'émission est laissée à Winlink |
 
 Le moteur d'origine était déjà une bibliothèque autonome sans dépendance à
 l'IHM — l'auteur l'avait conçue pour être appelée depuis son application TCQ.
@@ -279,7 +313,28 @@ Cette séparation a été préservée et renforcée : le clic droit dans l'Explo
 appelle le CLI, pas l'interface graphique, et ne démarre donc pas Qt pour une
 simple conversion.
 
-### Compression : −21 % à `medium`, −27 % à `low`
+### Compression : −25 à −37 % par rapport à `psdi_lib` 2.1.0
+
+Mesuré contre le moteur de F1GBD lui-même, chargé depuis son bytecode
+(`reference/bench/`), sur les documents de test de la suite :
+
+| Document | Préréglage | `psdi_lib` 2.1.0 | Ici | Écart |
+|---|---|---|---|---|
+| Rapport texte, 3 pages | `ultra_low`, `low` | 2 963 | 2 095 | −29 % |
+| Rapport texte, 3 pages | `medium`, `high` | 2 963 | 2 226 | −25 % |
+| Rapport riche (photos, tableau à filets, liens) | `ultra_low` | 4 657 | 2 918 | −37 % |
+| Rapport riche | `medium` | 9 018 | 6 085 | −33 % |
+| Rapport riche | `high` | 8 306 | 8 163 | −2 % |
+| Tableau de 12 lignes | `low` | 887 | 629 | −29 % |
+| Page pivotée (mode image) | `low` | 59 848 | 59 665 | −0,3 % |
+
+Les gains viennent du manifeste. Là où le JPEG fait tout — mode image, ou
+préréglage `high` sur un document de photographies — les deux moteurs se
+valent, ce qui est attendu : les paramètres JPEG sont ceux du format.
+
+Le détail de chaque changement, mesuré isolément, suit. Les pourcentages de ce
+tableau-ci sont des avant/après sur notre propre moteur, pas des écarts à
+l'original.
 
 Le profilage montre que le texte pèse 91 % du manifeste compressé ; les
 rectangles vectoriels tombent de 28 837 à 379 octets parce que LZMA exploite
@@ -293,8 +348,9 @@ rectangles a été implémenté puis retiré, gain mesuré exactement nul.
 | LZMA2 `pb=0` avec recherche de correspondances extrême | −2 % |
 | Coordonnées au point entier sur les deux préréglages bas | −6 % |
 
-Mesuré de bout en bout sur un rapport de six pages : **5 223 → 4 116 octets à
-`medium`**, et **3 812 octets à `low`**.
+Mesuré de bout en bout sur un rapport de six pages, avant et après ces quatre
+changements : **5 223 → 4 116 octets à `medium`** (−21 %), et **3 812 octets à
+`low`** (−27 %).
 
 Le cas du fragment unique pèse le plus lourd parce qu'un fragment seul couvre
 exactement sa ligne : sa boîte était donc stockée deux fois. Le lecteur retombe
@@ -391,6 +447,10 @@ les 50 ms, les changements de phase passant toujours. Mesuré sur le même
 bulletin : à la moitié du temps, la barre est à 37–46 % ; aucun intervalle
 immobile ne dépasse 60 ms.
 
+Le moteur 2.1.0 de F1GBD emprunte toujours ce chemin, un `insert_htmlbox` par
+fragment, et le banc le mesure : 1,4 à 1,8 s pour recomposer le rapport de
+trois pages, contre 0,13 à 0,23 s ici, à archive égale.
+
 ### Étiquettes d'axe vectorisées (version 2.2.2)
 
 Sur le graphique en barres de la page 4 du SITREP OMS Mali, les noms de villes
@@ -405,10 +465,11 @@ ornement isolé toujours écarté).
 
 ### Correctifs
 
-**Rotation ignorée en mode texte seul.** L'original désactivait entièrement la
-détection automatique de mode dès que « texte seul » était coché
-(`if mode == 'struct' and not skip_images:`). Un document pivoté cochant cette
-case se recomposait donc de travers. Ignorer les images est un choix légitime ;
+**Rotation ignorée en mode texte seul.** L'original désactive entièrement la
+détection automatique de mode dès que « texte seul » est coché
+(`if mode == 'struct' and not skip_images:`) — la 2.1.0 a conservé cette ligne.
+Un document pivoté coché ainsi se recompose donc de travers. Ignorer les images
+est un choix légitime ;
 ignorer une rotation ne l'est jamais, puisque le mode structuré travaille en
 coordonnées non pivotées. La détection tourne désormais toujours, seule la
 raison « scan » étant écartée en mode texte seul.
@@ -451,16 +512,13 @@ transparent — cette base est noire partout où le masque la rend invisible : u
 ombre portée devenait un cadre noir, un graphique en anneau un carré noir. Le
 masque est maintenant récupéré et composé avant toute utilisation des pixels.
 
-**Empaquetage.** Le binaire d'origine embarquait 846 Mo décompressés, dont
-330 Mo de PyTorch, plus transformers, pyarrow, scipy, sklearn et onnxruntime —
-aucun atteignable depuis le code, tous ramassés par PyInstaller dans
-l'environnement de développement. Le fichier `.spec` nomme explicitement les
-paquets à exclure, et le script de compilation alerte si la sortie dépasse
-250 Mo.
-
-**Cohérence de version.** Le module d'origine annonçait `1.0.5` dans son
-en-tête alors que la constante indiquait `1.0.6` ; l'historique n'avait pas été
-mis à jour.
+**Empaquetage.** Le binaire 1.0.6 embarquait 846 Mo décompressés et 9 478
+modules, dont 330 Mo de PyTorch, plus transformers, pyarrow, scipy, sklearn et
+onnxruntime — aucun atteignable depuis le code, tous ramassés par PyInstaller
+dans l'environnement de développement. F1GBD a réglé ce point de son côté : la
+2.1.0 tient en 107 Mo et 270 modules. Ici, le fichier `.spec` nomme
+explicitement les paquets à exclure, et le script de compilation alerte si la
+sortie dépasse 250 Mo.
 
 ---
 
@@ -487,7 +545,7 @@ message explicite. L'opérateur lit « Archive tronquée : le manifeste demande
 609 octets » au lieu d'une `LZMAError` ou d'une `struct.error`.
 
 **Ces contrôles ne concernent que la lecture.** L'encodeur est inchangé : les
-24 vecteurs de référence capturés avant l'ajout sont identiques au bit près
+vecteurs de référence capturés avant l'ajout sont identiques au bit près
 après. L'interopérabilité et le poids des archives ne bougent pas.
 
 ---
@@ -545,6 +603,13 @@ Il contrôle également que le flux LZMA2 réglé (`pb=0`, recherche extrême) s
 décode toujours avec la spécification de filtre nue, et que les charges utiles
 JPEG stockées brutes commencent bien par la signature JPEG.
 
+Ce décodeur simulé a désormais un juge. `reference/tools/bench.py` charge le
+`psdi_lib` 2.1.0 de F1GBD depuis son bytecode, dans le même interpréteur et
+avec le même MuPDF que son binaire, et fait recomposer nos archives par son
+moteur et les siennes par le nôtre. Le test unitaire reste parce qu'il tourne
+sans le bytecode, à chaque exécution de la suite ; le banc est ce qui prouve
+que la simulation est fidèle.
+
 ---
 
 ## Format d'archive
@@ -585,10 +650,12 @@ décodeur qui ne les connaît pas :
 | `{"t": "line", …}` | entrée de `dr` | trait horizontal ou vertical | sauté par `if not d['t'] == 'rect'` |
 | `lk` | page | liste `[{"b": boîte, "u": uri}]` | jamais lue |
 
-Ajouter une clé à ce tableau n'est acceptable qu'à cette même condition : le
-décodeur d'origine doit l'ignorer sans erreur, ce que le test
-`TestInteropSafeAdditions` vérifie en exécutant un port fidèle de sa boucle de
-recomposition.
+Ces deux comportements sont ceux de la boucle `_rebuild_struct_mode` de
+`psdi_lib` 2.1.0, inchangée depuis `pdf_trans` 1.0.6. Ajouter une clé à ce
+tableau n'est acceptable qu'à cette même condition : le décodeur d'origine doit
+l'ignorer sans erreur, ce que le test `TestInteropSafeAdditions` vérifie en
+exécutant un port fidèle de cette boucle, et ce que le banc de `reference/`
+confirme sur le bytecode réel.
 
 ---
 
@@ -612,7 +679,8 @@ L'environnement dédié n'est pas une question de propreté. PyInstaller embarqu
 tout ce qu'il trouve d'importable dans l'environnement depuis lequel il
 s'exécute : compiler depuis un interpréteur généraliste est exactement la façon
 dont une version se retrouve à transporter des paquets que l'application
-n'importe jamais — l'original livrait 846 Mo ainsi. Cela supprime aussi le
+n'importe jamais — la 1.0.6 de l'original livrait 846 Mo ainsi. Cela supprime
+aussi le
 piège des deux interpréteurs, où les dépendances sont installées dans un Python
 et PyInstaller lancé sous un autre, produisant un exécutable qui n'échoue que
 sur une machine vierge.
