@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Command-line interface.
 
 This is also what the Explorer context menu invokes. Keeping it separate from
@@ -12,7 +14,10 @@ import logging
 import os
 import sys
 
-from . import __version__, engine, format as psdi
+from . import (
+    __copyright__, __original_author__, __source_url__, __version__, engine,
+    format as psdi,
+)
 from .presets import (
     MODE_LABELS, MODE_PACKET_1200, MODE_VARA_FM_NARROW, MODE_VARA_HF,
     QUALITY_LABELS,
@@ -157,13 +162,39 @@ def cmd_inspect(path: str) -> int:
     return 0 if report["valid"] else 1
 
 
+def version_text() -> str:
+    """Version banner with the GPL v3 notices, one item per line."""
+    return (
+        f"PDF Teleporter {__version__}\n"
+        f"{__copyright__}\n"
+        f"Based on PDF Teleporter by {__original_author__}\n"
+        "GNU GPL v3; there is NO WARRANTY.\n"
+        f"Source: {__source_url__}\n"
+    )
+
+
+class _VersionAction(argparse.Action):
+    """Print the banner verbatim.
+
+    argparse's own "version" action re-wraps its text as a paragraph, which
+    runs the notice lines together.
+    """
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help="afficher la version et les mentions légales"):
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(version_text())
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="psditool",
         description="Convertit des documents PDF en archives radio .psdi et inversement.",
     )
-    parser.add_argument("--version", action="version",
-                        version=f"PDF Teleporter {__version__}")
+    parser.add_argument("--version", action=_VersionAction)
     parser.add_argument("--verbose", action="store_true",
                         help="journaliser l'activité du moteur sur stderr")
     parser.add_argument("--quiet", action="store_true",

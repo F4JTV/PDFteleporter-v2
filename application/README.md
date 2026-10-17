@@ -742,6 +742,20 @@ l'épaisseur qui le pose (−2 % sur LibreOffice, où les bordures alternent tro
 | Réglage LZMA par document (`lc`, `lp`, `pb`) | ±1 % ; `pb=0` reste le meilleur sur l'ensemble | sans objet |
 | Lignes de texte triées par position | ±1 % selon le document, et l'ordre de peinture du texte qui se chevauche change | écarté |
 
+### Mentions de copyright et de licence (version 2.4.1)
+
+Aucun fichier ne portait de mention de copyright : la ressource de version
+disait seulement « Licensed under the GNU GPL v3 », l'installateur annonçait
+« PDF Teleporter project » et la fenêtre À propos se limitait à nommer la
+licence. Or ce sont les mentions que la GPL oblige à conserver ; sans elles,
+l'obligation d'attribution n'a pas d'objet. Chaque fichier source reçoit son
+en-tête (voir « Licence »), la fenêtre À propos et `--version` affichent les
+mentions requises par l'article 5 d) avec l'adresse des sources, l'installateur
+renseigne éditeur, copyright et URL du projet. Aucune ligne de code
+fonctionnelle n'est modifiée : les vecteurs de référence sont identiques.
+`tests/test_notices.py` vérifie que tout nouveau fichier porte son en-tête et
+que les versions de l'installateur et des exécutables concordent.
+
 ### Correctifs
 
 **Rotation ignorée en mode texte seul.** L'original désactive entièrement la
@@ -840,13 +854,14 @@ recompose (voir « Relu avant publication »).
 python -m unittest discover -s tests -t .
 ```
 
-178 tests, sans dépendance en plus de celles de l'application.
+188 tests, sans dépendance en plus de celles de l'application.
 
 | Fichier | Objet |
 |---|---|
 | `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles, dictionnaire LZMA, coordonnées à largeur fixe |
 | `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, codage du texte, codec des images |
 | `tests/test_interop.py` | vecteurs de référence, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, bordures, images, place des glyphes) |
+| `tests/test_notices.py` | en-têtes de copyright et SPDX, mentions de la fenêtre À propos et de `--version`, concordance des versions |
 
 Les documents de test sont construits par `tests/fixtures.py` plutôt que livrés
 en fichiers PDF. Un PDF porte un horodatage de création et une disposition
@@ -1137,5 +1152,23 @@ reformuler un texte visible ne doit pas casser une commande ni une archive.
 
 ## Licence
 
-GNU GPL v3, héritée de l'implémentation originale de F1GBD. PyMuPDF est sous
-AGPL v3.
+Copyright (C) 2026 The PDF Teleporter contributors. D'après PDF Teleporter et
+le format `.psdi` de F1GBD (Jean-Louis Naudin), ADRASEC 77 – FNRASEC.
+
+GNU GPL v3 (`GPL-3.0-only`), héritée de l'implémentation originale : celle-ci
+renvoie au texte de la version 3 sans mention « ou ultérieure », et un dérivé
+ne peut pas élargir ce qu'il a reçu. PyMuPDF est sous AGPL v3, PyQt6 sous
+GPL v3.
+
+Chaque fichier source porte sa mention de copyright et son identifiant SPDX ;
+ceux qui descendent de l'implémentation de F1GBD (`engine.py`, `format.py`,
+`presets.py`, `test_interop.py`) le nomment. C'est par ces mentions que la GPL
+organise l'attribution : quiconque redistribue ce code doit les conserver
+intactes (article 4). Le gabarit qui termine `LICENSE.txt` fait partie du texte
+de la licence et reste tel quel.
+
+La fenêtre À propos et `psditool --version` affichent le copyright, l'absence de
+garantie, l'emplacement du texte de la licence et l'adresse du code source
+(article 5 d). Un installateur diffusé hors de ce dépôt — dans un recueil
+d'outils, sur une clé d'exercice — doit être accompagné de cette adresse ou des
+sources elles-mêmes (article 6).

@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Container-level tests.
 
 The point of this file is the receive path. An archive arriving over the air is

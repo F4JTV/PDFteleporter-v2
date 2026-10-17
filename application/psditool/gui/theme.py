@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Application style and palette.
 
 The Fusion style is forced rather than left to the platform. Fusion renders

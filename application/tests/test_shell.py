@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Explorer integration: the registry layout and the command lines it writes.
 
 The registry itself cannot be exercised off Windows, so these tests cover the

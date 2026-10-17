@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Background workers.
 
 Compression of a large scan at 150 DPI takes seconds to tens of seconds. Doing

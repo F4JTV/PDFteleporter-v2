@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """PDF Teleporter entry point.
 
 One executable serves three callers, distinguished by argv:

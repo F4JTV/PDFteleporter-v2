@@ -1,4 +1,6 @@
 @echo off
+rem Copyright (C) 2026 The PDF Teleporter contributors
+rem SPDX-License-Identifier: GPL-3.0-only
 setlocal enabledelayedexpansion
 rem ---------------------------------------------------------------------------
 rem  Builds PDF Teleporter and its installer.

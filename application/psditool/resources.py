@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Locating bundled resources.
 
 PyInstaller unpacks bundled data into a temporary directory whose path is

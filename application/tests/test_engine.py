@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Engine tests: round-trip, mode selection, determinism, fidelity."""
 
 from __future__ import annotations

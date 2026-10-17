@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 # PyInstaller spec for a one-folder Windows build.
 #
 # Two executables are produced from one analysis:

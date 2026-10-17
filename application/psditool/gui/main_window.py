@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Main window.
 
 Layout mirrors the operator's workflow rather than the code structure:
@@ -25,7 +27,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version__, engine, format as psdi
+from .. import (
+    __copyright__, __original_author__, __source_url__, __version__, engine,
+    format as psdi,
+)
 from ..resources import icon_path
 from ..presets import (
     MODE_PACKET_1200, MODE_VARA_FM_NARROW, MODE_VARA_HF, QUALITY_LABELS,
@@ -695,13 +700,32 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def show_about(self) -> None:
-        QMessageBox.about(
-            self, "À propos de PDF Teleporter",
-            f"<b>PDF Teleporter</b> {__version__}<br><br>"
-            "Compresse des documents PDF en archives .psdi pour les "
-            "transmettre sur des liaisons radio à bande étroite, et les "
-            "recompose à la réception.<br><br>"
-            "Les archives sont interopérables avec les autres "
-            "implémentations du format .psdi.<br><br>"
-            "Distribué sous licence GNU GPL v3.",
-        )
+        QMessageBox.about(self, "À propos de PDF Teleporter", about_text())
+
+
+def about_text() -> str:
+    """The About box body, including the GPL v3 'Appropriate Legal Notices'.
+
+    Section 5(d) requires an interactive interface to show a copyright
+    notice, a statement that there is no warranty, and how to view the
+    licence. The source location is added because a binary seen without it is
+    exactly what section 6 is about. Kept as a function so tests can check it
+    without opening a window.
+    """
+    source = html.escape(__source_url__)
+    shown = html.escape(__source_url__.removeprefix("https://"))
+    return (
+        f"<b>PDF Teleporter</b> {__version__}<br><br>"
+        "Compresse des documents PDF en archives .psdi pour les "
+        "transmettre sur des liaisons radio à bande étroite, et les "
+        "recompose à la réception.<br><br>"
+        "Les archives sont interopérables avec les autres "
+        "implémentations du format .psdi.<br><br>"
+        f"{html.escape(__copyright__)}.<br>"
+        "D'après PDF Teleporter et le format .psdi de "
+        f"{html.escape(__original_author__)}.<br><br>"
+        "Ce programme est un logiciel libre distribué sous licence GNU GPL "
+        "version 3, <b>sans aucune garantie</b>. Le texte de la licence "
+        "(LICENSE.txt) est installé avec le programme.<br><br>"
+        f"Code source : <a href=\"{source}\">{shown}</a>"
+    )

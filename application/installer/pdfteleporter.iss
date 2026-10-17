@@ -1,3 +1,5 @@
+; Copyright (C) 2026 The PDF Teleporter contributors
+; SPDX-License-Identifier: GPL-3.0-only
 ; PDF Teleporter installer -- requires Inno Setup 7.0 or later.
 ;
 ; Inno Setup 7 introduced SetupArchitecture, used below to produce a native
@@ -12,8 +14,9 @@
 ; PyInstaller. build.cmd in the project root does both steps in order.
 
 #define AppName        "PDF Teleporter"
-#define AppVersion     "2.4.0"
-#define AppPublisher   "PDF Teleporter project"
+#define AppVersion     "2.4.1"
+#define AppPublisher   "The PDF Teleporter contributors"
+#define AppURL         "https://github.com/F4JTV/PDFteleporter-v2"
 #define AppExeName     "PDFteleporter.exe"
 #define CliExeName     "psditool.exe"
 #define SourceDir      "..\dist\PDFteleporter"
@@ -23,6 +26,11 @@ AppId={{8F3A6C21-4D7E-4B92-A5C3-1E7D9B240A66}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
+; GPL v3 section 6: wherever the installer is seen, where its source is.
+AppCopyright=Copyright (C) 2026 {#AppPublisher}. Based on PDF Teleporter by F1GBD. GNU GPL v3.
+AppPublisherURL={#AppURL}
+AppSupportURL={#AppURL}
+AppUpdatesURL={#AppURL}/releases
 DefaultDirName={autopf}\PDFteleporter
 DefaultGroupName={#AppName}
 OutputDir=..\dist\installer

@@ -1,3 +1,8 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# Portions derived from PDF Teleporter by F1GBD (Jean-Louis Naudin),
+# ADRASEC 77 - FNRASEC, author of the original program and of the .psdi
+# format.
+# SPDX-License-Identifier: GPL-3.0-only
 """PDF <-> .psdi conversion.
 
 Two encodings share one container:

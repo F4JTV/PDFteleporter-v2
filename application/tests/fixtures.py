@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Deterministic test documents.
 
 Built programmatically rather than committed as PDF files. A PDF carries a
