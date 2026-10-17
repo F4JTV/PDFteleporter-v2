@@ -80,6 +80,7 @@ Extraction:
 
 bench.py loads psdi_lib.pyc straight into a CPython 3.13 interpreter with
 PyMuPDF 1.28.2 (the same MuPDF as the shipped DLL) and runs it next to
-psditool 2.2.1 on the v2 test fixtures: archive sizes, compression and
-rebuild times, and the four-way rebuild matrix (each archive through each
-decoder). bench.json holds the raw rows.
+psditool on the v2 test fixtures: archive sizes, compression and rebuild
+times, and the four-way rebuild matrix (each archive through each decoder).
+bench.json holds the raw rows, last regenerated against psditool 2.4.0: eight
+fixtures, four presets, 128 cross-decodes, all passing.

@@ -53,6 +53,10 @@ CASES = [
     ("mono", "monochrome_scan_like", {"quality": "low", "mode": "image"}),
     ("rich", "rich_report", {"quality": "ultra_low"}),
     ("rich", "rich_report", {"quality": "medium"}),
+    ("sheet", "bordered_sheet", {"quality": "ultra_low"}),
+    ("sheet", "bordered_sheet", {"quality": "medium"}),
+    ("graphics", "graphics_report", {"quality": "ultra_low"}),
+    ("graphics", "graphics_report", {"quality": "medium"}),
 ]
 
 
@@ -257,6 +261,157 @@ class TestFormatConstants(unittest.TestCase):
             self.assertEqual(preset["dpi"], dpi, name)
             self.assertEqual(preset["jpeg_quality"], jpeg, name)
             self.assertEqual(preset["lzma_preset"], lzma_preset, name)
+
+
+def _original_engine():
+    """F1GBD's psdi_lib 2.1.0, run from the bytecode kept in reference/.
+
+    Returns None when the bytecode is not next to this tree or does not match
+    the running interpreter -- a .pyc only loads into the Python version that
+    wrote it, 3.13 here. PSDI_REFERENCE_PYC may point at it explicitly.
+    """
+    import importlib.util
+    import logging
+    import marshal
+    import types
+
+    candidates = [
+        os.environ.get("PSDI_REFERENCE_PYC"),
+        os.path.join(os.path.dirname(__file__), "..", "..", "reference",
+                     "disasm", "psdi_lib.pyc"),
+    ]
+    path = next((c for c in candidates if c and os.path.exists(c)), None)
+    if path is None:
+        return None
+    with open(path, "rb") as handle:
+        if handle.read(16)[:4] != importlib.util.MAGIC_NUMBER:
+            return None
+        code = marshal.load(handle)
+    module = types.ModuleType("psdi_lib")
+    module.__file__ = "psdi_lib.py"
+    logging.disable(logging.CRITICAL)
+    try:
+        exec(code, module.__dict__)
+    finally:
+        logging.disable(logging.NOTSET)
+    return module
+
+
+class TestOriginalDecoder(unittest.TestCase):
+    """Our archives through F1GBD's own decoder, executed from its bytecode.
+
+    The legacy-decoder tests above reimplement the original from its
+    recovered source; this runs the real thing, so a misreading of that
+    source cannot hide a break. Skipped where the bytecode is absent.
+    """
+
+    DOCS = ("text_report", "tiny_table", "rich_report", "bordered_sheet",
+            "graphics_report")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original = _original_engine()
+        if cls.original is None:
+            raise unittest.SkipTest("reference/disasm/psdi_lib.pyc unavailable "
+                                    "for this interpreter")
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.paths = {name: getattr(fixtures, name)(os.path.join(cls._tmp.name, name + ".pdf"))
+                     for name in cls.DOCS}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def _words(pdf_bytes):
+        import pymupdf
+
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            return [w[4] for page in doc for w in page.get_text("words")]
+        finally:
+            doc.close()
+
+    def test_every_archive_rebuilds_with_the_same_text(self):
+        for name, path in self.paths.items():
+            for quality in ("ultra_low", "medium", "high"):
+                with self.subTest(doc=name, quality=quality):
+                    data, _ = engine.pdf_to_archive(path, quality=quality)
+                    theirs, info = self.original.archive_to_pdf(data)
+                    ours, _ = engine.archive_to_pdf(data)
+                    self.assertEqual(self._words(theirs), self._words(ours))
+
+    def _render(self, pdf_bytes):
+        import pymupdf
+
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            return doc[0].get_pixmap(dpi=144, colorspace=pymupdf.csGRAY)
+        finally:
+            doc.close()
+
+    def test_borders_reach_its_stations(self):
+        data, _ = engine.pdf_to_archive(self.paths["bordered_sheet"], quality="medium")
+        pix = self._render(self.original.archive_to_pdf(data)[0])
+        x0, y0, cw, ch = 400.6, 100.4, 61.3, 17.9
+        for r in range(7):
+            values = [pix.pixel(int((x0 + cw / 2) * 2), int((y0 + r * ch) * 2 + d))[0]
+                      for d in (-1, 0, 1)]
+            self.assertLess(min(values), 180, f"row border {r} missing")
+
+    @staticmethod
+    def _glyphs(pdf_bytes):
+        import pymupdf
+
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            out = []
+            for number, page in enumerate(doc):
+                for block in page.get_text("rawdict")["blocks"]:
+                    for line in block.get("lines", []):
+                        for span in line["spans"]:
+                            out.extend((number, char["c"], char["origin"], span["size"])
+                                       for char in span["chars"])
+            return sorted(out, key=lambda g: (g[0], round(g[2][1]), round(g[2][0], 1), g[1]))
+        finally:
+            doc.close()
+
+    def test_open_line_boxes_leave_every_glyph_in_place(self):
+        # A line that fits its box is stored with the page corner as its
+        # bottom-right. The original draws each line through a temporary page
+        # of the box's size, so the box enters its matrices: a glyph may move
+        # by float rounding, never by more.
+        for name in ("text_report", "bordered_sheet"):
+            for quality in ("ultra_low", "medium"):
+                with self.subTest(doc=name, quality=quality):
+                    opened, _ = engine.pdf_to_archive(self.paths[name], quality=quality)
+                    original = engine._open_line_box
+                    engine._open_line_box = lambda line, *args: line["b"]
+                    try:
+                        exact, _ = engine.pdf_to_archive(self.paths[name], quality=quality)
+                    finally:
+                        engine._open_line_box = original
+                    a = self._glyphs(self.original.archive_to_pdf(opened)[0])
+                    b = self._glyphs(self.original.archive_to_pdf(exact)[0])
+                    self.assertEqual([(g[0], g[1]) for g in a], [(g[0], g[1]) for g in b])
+                    for ga, gb in zip(a, b):
+                        self.assertAlmostEqual(ga[2][0], gb[2][0], delta=0.001)
+                        self.assertAlmostEqual(ga[2][1], gb[2][1], delta=0.001)
+                        self.assertAlmostEqual(ga[3], gb[3], delta=0.001)
+
+    def test_png_payloads_are_placed(self):
+        data, _ = engine.pdf_to_archive(self.paths["graphics_report"], quality="medium")
+        theirs = self.original.archive_to_pdf(data)[0]
+        import pymupdf
+
+        doc = pymupdf.open(stream=theirs, filetype="pdf")
+        try:
+            self.assertEqual(len(doc[0].get_images()), 2)
+        finally:
+            doc.close()
+        pix = self._render(theirs)
+        # Inside the tallest bar of the chart.
+        self.assertLess(pix.pixel(int(200 * 2), int(200 * 2))[0], 230)
 
 
 def _update_vectors() -> int:

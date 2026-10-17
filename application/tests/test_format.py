@@ -273,5 +273,96 @@ class TestPayloadPacking(unittest.TestCase):
         self.assertEqual(psdi.unpack_payload(flags, packed), text)
 
 
+
+class TestDictionarySize(unittest.TestCase):
+    """The encoder's dictionary is fitted to the data, never above 8 MiB."""
+
+    def test_fitted_to_the_data(self):
+        self.assertEqual(psdi._dict_size_for(0), 4096)
+        self.assertEqual(psdi._dict_size_for(5000), 8192)
+        self.assertEqual(psdi._dict_size_for(1 << 20), 1 << 20)
+        self.assertEqual(psdi._dict_size_for(100 << 20), 8 << 20)
+
+    def test_same_bytes_as_the_preset_dictionary_on_small_data(self):
+        data = b"PSDI manifest " * 300
+        fitted = psdi._lzma_compress(data, 9)
+        preset = lzma.compress(data, format=lzma.FORMAT_RAW,
+                               filters=[{"id": lzma.FILTER_LZMA2, "preset": 9}])
+        self.assertEqual(fitted, preset)
+
+    def test_far_matches_stay_within_the_default_decoder_window(self):
+        # A raw LZMA2 stream does not carry its dictionary size, and a decoder
+        # built on the plain filter spec -- the original's -- uses 8 MiB. A
+        # repeat 9 MiB back must not be coded as a match it cannot reach.
+        # Preset 9's own 64 MiB dictionary did exactly that: the stream below
+        # failed with "Corrupt input data" in the original's decoder.
+        import os
+
+        block = os.urandom(64 << 10)
+        data = block + bytes(9 << 20) + block
+        packed = psdi._lzma_compress(data, 9)
+        self.assertEqual(
+            lzma.decompress(packed, format=lzma.FORMAT_RAW,
+                            filters=[{"id": lzma.FILTER_LZMA2}]),
+            data,
+        )
+
+
+def _manifest_text(archive: bytes) -> str:
+    """The manifest exactly as written, read the way the original reads it."""
+    size = struct.unpack_from("<I", archive, 10)[0]
+    return lzma.decompress(archive[14:14 + size], format=lzma.FORMAT_RAW,
+                           filters=[{"id": lzma.FILTER_LZMA2}]).decode("utf-8")
+
+
+class TestManifestLayout(unittest.TestCase):
+    """Coordinates written at a fixed width: other text, the same numbers."""
+
+    @staticmethod
+    def _manifest(boxes, rects, text="Bonjour"):
+        return dict(VALID_MANIFEST, pages=[{
+            "pn": 1, "ir": [], "ck": [],
+            "tb": [{"l": [{"b": box, "s": [{"t": text}]} for box in boxes]}],
+            "dr": [{"t": "rect", "r": r, "c": "#000000", "w": 0.4} for r in rects],
+        }])
+
+    def test_decimal_coordinates_are_padded_with_zeros(self):
+        manifest = self._manifest([[84.1, 9, 1190.5, 841.9]], [[0.5, 12, 33.25, 12]])
+        text = _manifest_text(_manifest_archive(manifest))
+        self.assertIn('"b":[84.100,9.0000,1190.5,841.90]', text)
+        self.assertIn('"r":[0.5000,12.000,33.250,12.000]', text)
+
+    def test_whole_coordinates_are_padded_with_spaces(self):
+        manifest = self._manifest([[84, 9, 1191, 842]], [[0, 12, 33, 12]])
+        text = _manifest_text(_manifest_archive(manifest))
+        self.assertIn('"b":[  84,   9,1191, 842]', text)
+        self.assertIn('"r":[   0,  12,  33,  12]', text)
+
+    def test_every_value_reads_back_unchanged(self):
+        boxes = [[-0.5, 0, 12345.6, 7], [1e-05, 2.5e10, 3, 4], [], [0.1, 0.2, 0.3, 0.4]]
+        manifest = self._manifest(boxes, [[1, 2, 3, 4.5]])
+        archive = _manifest_archive(manifest)
+        self.assertEqual(json.loads(_manifest_text(archive)), manifest)
+        self.assertEqual(psdi.read_struct(archive).manifest, manifest)
+        self.assertTrue(psdi.read_struct(archive).crc_ok)
+
+    def test_text_that_looks_like_a_key_is_left_alone(self):
+        sly = 'x "b":[1,2] "r":[3] y'
+        manifest = self._manifest([[1.5, 2, 3, 4]], [], text=sly)
+        archive = _manifest_archive(manifest)
+        self.assertEqual(psdi.read_struct(archive).manifest["pages"][0]["tb"][0]["l"][0]["s"][0]["t"], sly)
+
+    def test_fixed_width_compresses_better(self):
+        import random
+
+        rng = random.Random(7)
+        rects = [[round(rng.uniform(0, 1190), 1), round(y, 1), round(rng.uniform(0, 1190), 1), round(y, 1)]
+                 for y in (rng.uniform(0, 840) for _ in range(800))]
+        manifest = self._manifest([], sorted(rects, key=lambda r: (r[1], r[0])))
+        plain = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode()
+        aligned = psdi._manifest_json(manifest).encode()
+        self.assertLess(len(psdi._lzma_compress_text(aligned)), len(psdi._lzma_compress_text(plain)))
+
+
 if __name__ == "__main__":
     unittest.main()

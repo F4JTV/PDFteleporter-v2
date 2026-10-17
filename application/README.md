@@ -44,8 +44,10 @@ sur la spécification d'origine.
 Cette compatibilité est vérifiée contre le vrai moteur de F1GBD, pas contre
 l'idée qu'on s'en fait : `reference/tools/bench.py` charge `psdi_lib` 2.1.0
 directement depuis son bytecode et fait recomposer chaque archive de chaque côté
-par chaque décodeur. Six documents de test, quatre préréglages, quatre sens :
-les 96 recompositions passent (`reference/bench/bench.json`).
+par chaque décodeur. Huit documents de test, quatre préréglages, quatre sens :
+les 128 recompositions passent (`reference/bench/bench.json`). La suite de tests
+fait de même à chaque exécution quand `reference/` est présent
+(`TestOriginalDecoder`).
 
 ## Périmètre
 
@@ -207,7 +209,7 @@ qu'entre deux minuscules. Un indicatif n'est donc plus maquillé en mot : il
 ressort tel quel, `)\x17/79`. Le texte reste perdu, puisque rien dans le PDF ne
 permet de le retrouver — c'est précisément pourquoi il est rastérisé ici. Le
 banc de mesure le montre sur le PDF de test privé de ToUnicode : son archive
-pèse 347 octets, la saisie absente ; la nôtre 1 098, la saisie présente.
+pèse 347 octets, la saisie absente ; la nôtre 725, la saisie présente.
 
 ### Images en entrée
 
@@ -304,7 +306,7 @@ visible en réception :
 | Un chemin passé en argument ouvre l'IHM dessus ; aucune conversion sans fenêtre | CLI headless complet |
 | Un exécutable fenêtré | Deux : fenêtré (IHM) et console (CLI) |
 | Glisser-déposer, pas de menu contextuel | Glisser-déposer et menu contextuel Explorateur |
-| Archive 7z à décompresser | Installateur Inno Setup 7, ressources de version Windows |
+| Installateur Windows (depuis la 2.1.0) ou archive 7z portable | Installateur Inno Setup 7, ressources de version Windows |
 | Couche TNC/VARA et gestionnaire de transfert embarqués | Compression seule ; l'émission est laissée à Winlink |
 
 Le moteur d'origine était déjà une bibliothèque autonome sans dépendance à
@@ -313,24 +315,32 @@ Cette séparation a été préservée et renforcée : le clic droit dans l'Explo
 appelle le CLI, pas l'interface graphique, et ne démarre donc pas Qt pour une
 simple conversion.
 
-### Compression : −25 à −37 % par rapport à `psdi_lib` 2.1.0
+### Compression par rapport à `psdi_lib` 2.1.0
 
 Mesuré contre le moteur de F1GBD lui-même, chargé depuis son bytecode
 (`reference/bench/`), sur les documents de test de la suite :
 
-| Document | Préréglage | `psdi_lib` 2.1.0 | Ici | Écart |
+| Document | Préréglage | `psdi_lib` 2.1.0 | Ici (2.4.0) | Écart |
 |---|---|---|---|---|
-| Rapport texte, 3 pages | `ultra_low`, `low` | 2 963 | 2 095 | −29 % |
-| Rapport texte, 3 pages | `medium`, `high` | 2 963 | 2 226 | −25 % |
-| Rapport riche (photos, tableau à filets, liens) | `ultra_low` | 4 657 | 2 918 | −37 % |
-| Rapport riche | `medium` | 9 018 | 6 085 | −33 % |
-| Rapport riche | `high` | 8 306 | 8 163 | −2 % |
-| Tableau de 12 lignes | `low` | 887 | 629 | −29 % |
+| Rapport texte, 3 pages | `ultra_low`, `low` | 2 963 | 1 749 | −41 % |
+| Rapport texte, 3 pages | `medium`, `high` | 2 963 | 1 813 | −39 % |
+| Rapport riche (photos, tableau à filets, liens) | `ultra_low` | 4 657 | 1 791 | −62 % |
+| Rapport riche | `medium` | 9 018 | 5 709 | −37 % |
+| Rapport riche | `high` | 8 306 | 7 971 | −4 % |
+| Tableau de 12 lignes | `low` | 887 | 493 | −44 % |
+| Graphique et photographie | `ultra_low` | 13 752 | 6 665 | −52 % |
+| Graphique et photographie | `medium` | 24 616 | 21 845 | −11 % |
+| Bordures Excel et LibreOffice | `ultra_low` | 1 078 | 702 | −35 % |
+| Bordures Excel et LibreOffice | `medium` | 1 078 | 725 | −33 % |
 | Page pivotée (mode image) | `low` | 59 848 | 59 665 | −0,3 % |
 
-Les gains viennent du manifeste. Là où le JPEG fait tout — mode image, ou
+Les gains viennent du manifeste et, depuis la 2.3.0, des images qui ne sont pas
+des photographies. Là où le JPEG d'une photographie fait tout — mode image, ou
 préréglage `high` sur un document de photographies — les deux moteurs se
-valent, ce qui est attendu : les paramètres JPEG sont ceux du format.
+valent, ce qui est attendu : les paramètres JPEG sont ceux du format. Depuis la
+2.4.0, aucune ligne n'est plus lourde que l'original, y compris celle des
+bordures à `medium`, qui porte pourtant les traits du tableau LibreOffice que
+l'original ne stocke pas du tout (voir la 2.3.0 et la 2.4.0).
 
 Le détail de chaque changement, mesuré isolément, suit. Les pourcentages de ce
 tableau-ci sont des avant/après sur notre propre moteur, pas des écarts à
@@ -396,7 +406,9 @@ supprimés n'auraient jamais été visibles.
 verticaux (lignes de tableau, soulignés, règles de section) n'est plus traité
 comme une illustration à rastériser : chaque segment devient une entrée
 `{"t": "line", "r": [x0, y0, x1, y1], "c": couleur, "w": épaisseur}` dans la
-liste `dr` de la page. Quelques octets au lieu d'une image.
+liste `dr` de la page. Quelques octets au lieu d'une image. *Depuis la 2.3.0,
+ces traits sont stockés en rectangles sans épaisseur, que le décodeur d'origine
+dessine — voir plus bas ; les entrées `line` restent lues.*
 
 **Liens.** Les annotations `/URI` de chaque page sont relevées dans une liste
 `lk` et réinsérées à la recomposition. Un bulletin qui renvoie vers un site de
@@ -462,6 +474,273 @@ ordinaires, lisibles par le décodeur d'origine. Les vecteurs de référence son
 inchangés : aucune fixture ne contenait de texte vectorisé, ce que les quatre
 tests ajoutés corrigent (rangée reconnue, aller-retour, titre isolé conservé,
 ornement isolé toujours écarté).
+
+### Tableaux, bordures et images : −11 % sur quatre documents réels (version 2.3.0)
+
+Mesuré sur quatre documents d'exercice réels — un bilan préfectoral de cinq
+pages, un point de situation exporté d'Excel, le même exporté de LibreOffice,
+et le SITREP OMS Mali de huit pages — à chacun des quatre préréglages, contre
+la version 2.2.2 et contre `psdi_lib` 2.1.0 de F1GBD exécuté depuis son
+bytecode. Tailles d'archive en octets :
+
+| Document | Préréglage | F1GBD 2.1.0 | 2.2.2 | 2.3.0 | 2.3.0 / 2.2.2 |
+|---|---|---|---|---|---|
+| Bilan préfectoral | `ultra_low` | 15 719 | 8 773 | 7 927 | −10 % |
+| Bilan préfectoral | `medium` | 25 137 | 11 945 | 10 552 | −12 % |
+| Point de situation Excel | `ultra_low` | 24 592 | 18 933 | 13 233 | −30 % |
+| Point de situation Excel | `medium` | 24 592 | 24 177 | 14 363 | −41 % |
+| Point de situation LibreOffice | `ultra_low` | 11 556 | 14 091 | 12 757 | −9 % |
+| Point de situation LibreOffice | `medium` | 11 556 | 17 930 | 17 133 | −4 % |
+| SITREP OMS | `ultra_low` | 64 301 | 50 241 | 45 698 | −9 % |
+| SITREP OMS | `medium` | 124 656 | 112 227 | 104 950 | −6,5 % |
+
+Sur les seize archives (quatre documents, quatre préréglages) : 580 352 →
+514 522 octets, **−11,3 %** ; contre 682 154 octets pour `psdi_lib` 2.1.0 sur
+les mêmes seize. Chaque recomposition a été comparée à l'original, page par
+page, à 100 dpi : l'écart est identique ou plus faible partout, par notre
+décodeur comme par celui de F1GBD.
+
+**Pourquoi LibreOffice reste plus lourd chez nous que chez F1GBD.** Son moteur
+ne relève que les rectangles ; un trait isolé est ignoré. Or LibreOffice dessine
+chaque bord de cellule comme un trait séparé : son archive ne contient aucune
+bordure de tableau, et sa recomposition sort sans quadrillage. Les 5 600 octets
+d'écart à `medium` sont ces bordures.
+
+**Les bordures sont des morceaux.** Excel dessine chaque bord de cellule comme
+son propre rectangle plein de 0,84 pt, LibreOffice comme son propre trait : une
+ligne de tableau arrive en une douzaine de pièces bout à bout. Sur la feuille
+Excel, les dessins faisaient 75 % de l'archive, et 52 % sur LibreOffice. Un
+compactage par page (`_compact_drawings`) raccorde les pièces de même style
+qui se prolongent exactement, remplace un remplissage répété par sa dernière
+copie, retire le blanc posé sur le papier blanc et ce que l'arrondi réduit à un
+point, puis range chaque série de même style par position, ce que LZMA
+code bien mieux que l'ordre cellule par cellule du producteur.
+
+Ce compactage ne doit rien changer à la page, et trois règles y veillent :
+
+- **L'ordre de peinture.** Une pièce ne rejoint une pièce antérieure que si rien
+  d'une autre couleur, peint entre les deux, ne la recouvre — sinon elle
+  passerait dessous. Toucher compte comme recouvrir.
+- **Ce qui est peint deux fois reste peint deux fois.** Un trait plus fin qu'un
+  pixel ou deux, peint deux fois, sort plus foncé à l'écran : LibreOffice trace
+  chaque bordure intérieure deux fois, une par cellule voisine, et l'original
+  en est plus sombre. Fusionner ces doublons rendait les bordures d'un ton plus
+  clair qu'à l'origine à 100 % — mesuré, puis écarté. Les pièces fines ne se
+  raccordent donc que bout à bout, jamais en se chevauchant.
+- **Un tracé est peint d'un seul coup.** À l'inverse, les segments d'un même
+  tracé qui se recouvrent ne reçoivent l'encre qu'une fois ; ils sont joints
+  (`_join_path_segments`).
+
+Deux différences restent possibles, larges d'un pixel l'une et l'autre : la
+couture anticrénelée entre deux pièces jointes disparaît, et le contour d'un
+aplat épais peint plusieurs fois à l'identique, ramené à une seule couche,
+perd l'assombrissement que ces couches donnaient à ses pixels de bord.
+Mesuré sur toutes les pages des quatre documents, aux quatre
+préréglages, dessins seuls, avec et sans compactage, à 150 dpi : aucun pixel ne
+bouge de plus de 67 niveaux de gris sur 255 ; 16 sur 252 millions bougent de
+plus de 64, tous sur la feuille Excel, et 3 716 de plus de 32. Sur les pages
+entières recomposées à 100 dpi, texte et images compris, l'écart est le même
+par notre décodeur et par celui de F1GBD : 2 pixels sur 112 millions au-delà
+de 64 niveaux.
+
+**Les traits deviennent des rectangles sans épaisseur.** En 2.2.x, un trait
+était stocké en entrée `line`, que le décodeur d'origine saute : une station
+équipée de la version de F1GBD recevait nos tableaux LibreOffice sans une seule
+bordure. Un rectangle de hauteur nulle, tracé à l'épaisseur du trait, couvre
+exactement les mêmes pixels qu'un trait à bouts plats — vérifié identique au
+pixel près de 150 à 600 dpi — et c'est un `rect` ordinaire, que les deux
+décodeurs dessinent. Sur le document LibreOffice recomposé par le décodeur de
+F1GBD, l'écart moyen à l'original tombe de 8,7 à 2,0 niveaux de gris.
+
+**Les bordures Excel ne disparaissent plus en « Très basse » et « Basse ».**
+Ces deux préréglages arrondissent les coordonnées au point entier. Une bordure
+de 0,84 pt devenait épaisse de 1 pt, ou de 0 — sur la feuille Excel, 866
+bordures sur 4 196 disparaissaient. Aux deux préréglages bas, un remplissage
+de moins de 2 pt est donc stocké comme un trait : la position s'arrondit, mais
+l'épaisseur voyage à part, au dixième de point, et ne peut plus s'annuler. À
+`medium` et `high`, le dixième de point garde déjà l'épaisseur : la forme
+remplie y reste, plus courte et plus fidèle.
+
+**Les graphiques et les logos passent en PNG quand c'est mieux.** Les deux
+décodeurs confient chaque image à `insert_image` de MuPDF, qui reconnaît le PNG
+aussi bien que le JPEG. Un logo, un graphique, une étiquette d'axe vectorisée
+sont quelques aplats aux bords nets : ce que le JPEG code le plus mal, avec des
+halos autour de chaque contour. Chaque image d'une archive structurée est donc
+proposée en JPEG — progressif et non progressif, le plus petit des deux, mêmes
+pixels — puis, si elle a moins de 4 096 couleurs, en PNG : en niveaux de gris
+sans perte pour une image grise, sur ses propres couleurs si elle en a 256 au
+plus, sinon sur la plus petite palette calculée qui convient. Un PNG n'est
+retenu que s'il est plus fidèle que le JPEG d'au moins 1 dB de PSNR — ce que le
+gris sans perte est toujours, et ce que la palette des couleurs propres n'est
+pas d'office : en y rapportant les pixels, Pillow confond des couleurs
+distantes de quelques niveaux. Ensuite la plus petite forme gagne, mesurée
+telle que le conteneur la stockera, après son LZMA éventuel — c'est pourquoi le
+PNG est écrit non compressé : LZMA code les indices de palette mieux que le
+deflate du PNG. La palette calculée est affinée par k-moyennes, sans quoi le
+cœur des lettres s'éclaircit (126 au lieu de 89 sur les étiquettes du SITREP ;
+108 avec l'affinage). Sur les deux documents à images, aux quatre préréglages,
+40 images passent en PNG : 33 910 → 23 273 octets stockés (−31 %), et aucune
+n'a un SSIM ni un PSNR inférieur à celui du JPEG remplacé. Les photographies
+restent en JPEG ; les archives en mode image de page aussi, car le bruit d'un
+scan rend toute palette plusieurs fois plus lourde.
+
+**Le dictionnaire LZMA est ajusté à la donnée.** Le préréglage 9 réserve
+64 Mio de dictionnaire, et l'allocation coûtait 38 ms par appel — sur un
+document à petites images, chacune compressée seule, la moitié du temps de
+compression. Le dictionnaire suit désormais la taille de la donnée, sans
+changer les octets produits — à un octet près, sur un seul des vecteurs de
+référence. Il est aussi plafonné à 8 Mio : un flux LZMA2
+brut ne mémorise pas la taille de son dictionnaire, et le décodeur d'origine
+prend la valeur par défaut, 8 Mio. Une charge de plus de 8 Mio compressée avec
+64 Mio pouvait ainsi devenir illisible chez lui (« Corrupt input data »,
+reproduit en test) ; aucune archive réelle n'atteignait ce seuil.
+
+**Essayé et écarté**, mesures à l'appui :
+
+| Piste | Mesure | Décision |
+|---|---|---|
+| JPEG 2000 pour les photographies | 19 à 112 % *plus lourd* que le JPEG à PSNR et SSIM égaux | écarté |
+| Réglage LZMA (`lc`, `lp`, recherche) | −0,3 % au mieux | sans objet |
+| Ordre des clés JSON | ±1 %, selon le document | sans objet |
+| Fusion des doublons fins de LibreOffice | −1,3 % de plus à `medium`, bordures plus claires à l'écran | écarté (visible) |
+| Raccord des bordures Excel par-dessus les croisements | −5 % sur la feuille Excel, là où la bordure qui croise couvre le vide ; ailleurs ce vide est l'intérieur blanc d'une double bordure | pas retenu : une règle de plus pour un gain modeste |
+| Optimisation sans perte mozjpeg | −1,5 % sur les photographies | possible, mais ajoute une dépendance native au build |
+| Supprimer la marge de 10 % sur la résolution des images | −4 à −7 % sur le SITREP | écarté : c'est une baisse de résolution |
+
+**Limite constatée, héritée du format.** Les deux décodeurs peignent toujours
+les rectangles, puis les images, puis le texte. Un cadre tracé *par-dessus*
+une image dans l'original passe donc dessous à la recomposition : la carte de
+la page 4 du SITREP perd ainsi son cadre noir de 3 pt, caché sous l'ombre portée
+— chez F1GBD comme ici. Y remédier demanderait de rastériser ces zones ; ce
+n'est pas fait.
+
+**Relu avant publication.** Une relecture indépendante de la 2.3.0 — 14 500
+listes de dessins aléatoires rendues à 72, 150 et 600 dpi, un PDF hostile passé
+par le vrai décodeur de F1GBD, les cas limites du codec d'images — n'a trouvé
+aucune entrée où le compactage change visiblement la page, ni aucune que le
+décodeur d'origine refuse. Elle a relevé ailleurs cinq défauts du code neuf et
+deux plus anciens, tous corrigés et reproduits en test (`TestReviewFindings`) :
+
+- un tracé à la fois rempli et contouré qui ne forme pas un rectangle — un
+  cadre en L, un trait peint par `B` — perdait ses traits : régression du
+  premier jet de la 2.3.0 ;
+- un aplat géant débordant de la page faisait parcourir au compactage des
+  millions de cases de sa grille, 24 s pour un seul : l'index s'arrête
+  désormais au bord de la page ;
+- une épaisseur de 0,10 à 0,15 pt, arrondie à 0,1, tombait au seuil où les deux
+  décodeurs tracent un filet d'un pixel, bien plus sombre à 150 dpi : elle est
+  gardée au centième, 0,11 pt au moins ;
+- la palette « exacte » des images de 256 couleurs ou moins ne l'était pas tout
+  à fait — Pillow y confond des couleurs voisines de quelques niveaux — et
+  échappait au contrôle de fidélité : elle y passe comme les autres ;
+- une seconde quantification tramée ne servait à rien, Pillow ignorant le
+  tramage quand il calcule lui-même la palette : retirée ;
+- plus ancien, déjà dans la 2.2.2 : notre décodeur abandonnait la
+  recomposition (« rect must be finite and not empty ») sur une image placée
+  dans un cadre de moins d'un demi-point, que l'arrondi des préréglages bas
+  réduisait à une largeur nulle. L'encodeur ne l'émet plus, et le décodeur saute
+  une image sans surface, absente ou illisible au lieu d'échouer. Le décodeur de
+  F1GBD la tolérait déjà ;
+- plus ancien aussi : un rectangle tracé de hauteur nulle (`re` puis `S`),
+  façon courante de dessiner un filet, était jeté à tous les préréglages ; c'est
+  maintenant un trait.
+
+La même relecture a montré qu'un aplat que l'arrondi réduit à une hauteur
+nulle n'est pas tout à fait invisible — MuPDF le trace d'un pixel pâle : il
+n'est plus retiré. Ces corrections coûtent 45 octets sur les seize archives
+réelles, tous au bilan préfectoral en « Très basse » et « Basse », et ne
+changent aucun vecteur de référence.
+
+### Tableaux LibreOffice et Excel plus légers que l'original, quadrillage compris (version 2.4.0)
+
+Après la 2.3.0, le point de situation exporté de LibreOffice restait plus lourd
+ici que chez F1GBD — 17 133 octets contre 11 556 à « Moyenne » — parce que son
+moteur jette les bordures du tableau. Il est désormais plus léger avec son
+quadrillage, sans changer le format ni ajouter de dépendance. Mêmes quatre
+documents, tailles en octets :
+
+| Document | Préréglage | F1GBD 2.1.0 | 2.3.0 | 2.4.0 | 2.4.0 / F1GBD |
+|---|---|---|---|---|---|
+| Point de situation LibreOffice | `ultra_low`, `low` | 11 556 | 12 757 | 10 105 | −13 % |
+| Point de situation LibreOffice | `medium`, `high` | 11 556 | 17 133 | 10 879 | −6 % |
+| Point de situation Excel | `ultra_low`, `low` | 24 592 | 13 233 | 11 506 | −53 % |
+| Point de situation Excel | `medium`, `high` | 24 592 | 14 363 | 10 979 | −55 % |
+| Bilan préfectoral | `medium` | 25 137 | 10 552 | 10 268 | −59 % |
+| SITREP OMS | `medium` | 124 656 | 104 950 | 102 071 | −18 % |
+
+Sur les seize archives : 514 522 → 476 740 octets (−7,3 %), contre 682 154 pour
+`psdi_lib` 2.1.0 (−30 %). L'écart moyen à l'original, page par page à 100 dpi,
+est le même au millième de niveau de gris près sur chacune, ou un peu plus
+faible, par notre décodeur comme par celui de F1GBD. Le format ne change pas :
+ce sont les mêmes clés, écrites autrement.
+
+**Les mots coupés aux ligatures sont recollés.** LibreOffice dessine les
+ligatures « ti » et « tt » dans une police à part : « Identité » arrive en trois
+fragments, « Iden », « ti », « té », chacun avec sa boîte. Les deux décodeurs
+les remettent côte à côte dans la même boîte HTML. Recollés selon la règle même
+de notre décodeur — même style, écart inférieur à 0,45 fois le corps —, ils
+donnent la même page, vérifiée au pixel près par les deux décodeurs. Sur le
+document LibreOffice, ces boîtes de fragments pesaient un dixième de
+l'archive.
+
+**Une ligne qui tient dans sa boîte la garde ouverte.** Chaque décodeur pose
+une ligne dans une boîte HTML construite sur la boîte stockée : le coin haut
+gauche place le texte, le bord droit et le bas ne servent qu'à savoir s'il
+tient — sinon il est réduit. Une ligne qui tient déjà en taille réelle se
+dessine donc à l'identique dans toute boîte plus grande, et la plus grande est
+la page : son coin bas droit, répété sur chaque ligne, ne coûte presque rien à
+LZMA. Le moteur mesure chaque ligne dans la police de base qu'emploient les
+décodeurs — mêmes chasses que la mise en page HTML, vérifié sur 600 lignes des
+documents de test. Une ligne réduite pour tenir garde sa boîte exacte, puisque
+c'est elle qui fixe la réduction ; de même une ligne à plusieurs fragments, ou
+dont un caractère manque à la police de base. Notre décodeur donne des pixels
+identiques. Celui de F1GBD fait passer chaque ligne par une page temporaire à
+la taille de la boîte : chaque glyphe se retrouve à moins d'un millième de
+point de sa place précédente — mesuré sur les 13 338 caractères du SITREP —, ce
+qui peut faire basculer l'anticrénelage d'un bord de lettre d'un pixel, rien
+de plus. Le coin de la page est aussi le choix le plus court : ramener le bas
+de la boîte au haut de la ligne coûterait 2 à 4 % de plus, et le décodeur de
+F1GBD, qui découpe chaque ligne à sa boîte, y perdrait le bas des lettres.
+
+**Les coordonnées sont écrites à largeur fixe.** `84.100` au lieu de `84.1`,
+`  84` au lieu de `84` : JSON lit les mêmes nombres, et le manifeste reste du
+JSON valide. Mais chaque rectangle a maintenant la longueur du précédent, et
+LZMA code une répétition à distance inchangée bien moins cher qu'à une distance
+nouvelle — or deux bordures voisines ne diffèrent que d'une coordonnée ou
+deux. Sur les deux exports de tableur, −11 à −13 % du manifeste compressé au
+dixième de point, −2 à −3 % au point entier. Le texte écrit est relu et comparé
+au manifeste avant de partir.
+
+**Quatre traits qui ferment un cadre deviennent un rectangle tracé.**
+LibreOffice dessine le cadre intérieur de chaque cellule en quatre traits
+séparés. Un rectangle tracé dessine les quatre mêmes côtés : une entrée et
+quatre nombres au lieu de quatre entrées et douze nombres. Les côtés gardent
+exactement leur position. Seuls les coins peuvent changer : un trait qui
+dépassait du cadre, ou s'arrêtait avant, d'au plus un pas d'arrondi — 0,1 pt,
+ou un demi-trait au point entier — s'arrête maintenant pile sur le cadre, et le
+carré du coin est peint une fois au lieu de deux. Le document LibreOffice
+compte 219 cadres de ce type, soit 9 % de son archive. Mesuré sur toutes les
+pages des quatre documents, aux quatre préréglages, dessins seuls, à 150 dpi :
+aucun pixel ne bouge de plus de 99 niveaux de gris, et 200 sur 252 millions
+bougent de plus de 64 — les 184 des coins de cadre plus les 16 de la feuille
+Excel déjà notés en 2.3.0. Les deux versions sont indiscernables à 1000 %.
+
+Deux ajustements de moindre portée : toutes les lignes d'une page tiennent
+dans un seul bloc de texte, aucun décodeur ne donnant de sens aux blocs (−1 à
+−2 %) ; et une série de traits de même couleur est triée d'un seul tenant même
+quand l'épaisseur change, le noir composant de la même façon quelle que soit
+l'épaisseur qui le pose (−2 % sur LibreOffice, où les bordures alternent trois
+épaisseurs).
+
+**Essayé et écarté**, mesures à l'appui :
+
+| Piste | Mesure | Décision |
+|---|---|---|
+| Quadrillage LibreOffice tramé en PNG transparent | 7,2 Ko à 150 dpi, 13 Ko à 300 dpi, contre 4,3 Ko en vecteurs (7,7 Ko en 2.3.0) ; flou au zoom | écarté |
+| Traits raboutés malgré leurs chevauchements | −21 % sur la 2.3.0 à `medium` ; les recouvrements peints deux fois s'éclaircissent | écarté (visible) |
+| Type d'entrée compact pour la grille, ignoré par l'original | non mesuré : les stations F1GBD perdraient le quadrillage | écarté |
+| Réglage LZMA par document (`lc`, `lp`, `pb`) | ±1 % ; `pb=0` reste le meilleur sur l'ensemble | sans objet |
+| Lignes de texte triées par position | ±1 % selon le document, et l'ordre de peinture du texte qui se chevauche change | écarté |
 
 ### Correctifs
 
@@ -548,6 +827,11 @@ message explicite. L'opérateur lit « Archive tronquée : le manifeste demande
 vecteurs de référence capturés avant l'ajout sont identiques au bit près
 après. L'interopérabilité et le poids des archives ne bougent pas.
 
+Depuis la 2.3.0, une image dont le cadre n'a pas de surface, dont la charge
+utile manque ou que MuPDF ne sait pas lire n'est plus une défaillance : elle
+est sautée avec un avertissement dans le journal, et le reste de la page se
+recompose (voir « Relu avant publication »).
+
 ---
 
 ## Tests
@@ -556,13 +840,13 @@ après. L'interopérabilité et le poids des archives ne bougent pas.
 python -m unittest discover -s tests -t .
 ```
 
-117 tests, sans dépendance en plus de celles de l'application.
+178 tests, sans dépendance en plus de celles de l'application.
 
 | Fichier | Objet |
 |---|---|
-| `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles |
-| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité |
-| `tests/test_interop.py` | vecteurs de référence et décodage historique |
+| `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles, dictionnaire LZMA, coordonnées à largeur fixe |
+| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, codage du texte, codec des images |
+| `tests/test_interop.py` | vecteurs de référence, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, bordures, images, place des glyphes) |
 
 Les documents de test sont construits par `tests/fixtures.py` plutôt que livrés
 en fichiers PDF. Un PDF porte un horodatage de création et une disposition
@@ -610,6 +894,16 @@ moteur et les siennes par le nôtre. Le test unitaire reste parce qu'il tourne
 sans le bytecode, à chaque exécution de la suite ; le banc est ce qui prouve
 que la simulation est fidèle.
 
+`TestOriginalDecoder` fait entrer ce juge dans la suite : quand
+`reference/disasm/psdi_lib.pyc` est à côté de l'application et que
+l'interpréteur est un Python 3.13 — un `.pyc` ne se charge que dans la version
+qui l'a produit —, nos archives de cinq documents de test, à trois préréglages,
+sont recomposées par le vrai décodeur de F1GBD : même texte que par le nôtre,
+bordures LibreOffice présentes, images PNG placées, et chaque glyphe à moins
+d'un millième de point de sa place quand la boîte de ligne est ouverte (voir
+la 2.4.0). Ailleurs, ces quatre tests sont sautés, pas échoués. `PSDI_REFERENCE_PYC` peut désigner le fichier
+explicitement.
+
 ---
 
 ## Format d'archive
@@ -638,6 +932,12 @@ toujours positionné : les données JPEG sont déjà codées par entropie et LZM
 gonfle en général, chaque charge utile est donc stockée dans la forme la plus
 petite des deux.
 
+Une charge utile de version 1 est un JPEG ou, depuis la 2.3.0, un PNG ; les deux
+décodeurs la passent telle quelle à `insert_image`, qui reconnaît le format à
+ses octets. Une charge utile de version 2 est toujours un JPEG. Le dictionnaire
+LZMA de l'encodeur ne dépasse jamais 8 Mio, la fenêtre par défaut du décodeur
+d'origine.
+
 **Cette disposition ne doit pas être modifiée.** Réordonner ou redimensionner un
 champ rompt l'interopérabilité avec les stations en service.
 
@@ -647,8 +947,25 @@ décodeur qui ne les connaît pas :
 
 | Clé | Où | Contenu | Comportement du décodeur d'origine |
 |---|---|---|---|
-| `{"t": "line", …}` | entrée de `dr` | trait horizontal ou vertical | sauté par `if not d['t'] == 'rect'` |
+| `{"t": "line", …}` | entrée de `dr` | trait ; écrit par la 2.2.x seulement, toujours lu | sauté par `if not d['t'] == 'rect'` |
 | `lk` | page | liste `[{"b": boîte, "u": uri}]` | jamais lue |
+
+Depuis la 2.3.0, un trait est un `rect` ordinaire de hauteur ou de largeur
+nulle, tracé (`c`, `w`) : rien de nouveau pour un décodeur, et le décodeur
+d'origine le dessine.
+
+La 2.4.0 n'ajoute aucune clé, mais écrit les mêmes autrement — trois points
+qu'un autre décodeur doit savoir :
+
+- les coordonnées des tableaux `r` et `b` sont écrites à largeur fixe :
+  `84.100`, `  84`. Tout lecteur JSON y lit les mêmes nombres ;
+- la boîte `b` d'une ligne qui tient en taille réelle dans sa boîte d'origine
+  a pour coin bas droit celui de la page. Elle ne décrit plus l'étendue du
+  texte, seulement la place où il peut se poser. Un décodeur qui centrerait ou
+  justifierait le texte dans sa boîte ne pourrait plus s'y fier ; aucun ne le
+  fait, ni celui de F1GBD ni celui-ci ;
+- toutes les lignes d'une page sont dans un seul bloc de `tb`, et un rectangle
+  tracé sans remplissage peut être le cadre de quatre traits d'origine.
 
 Ces deux comportements sont ceux de la boucle `_rebuild_struct_mode` de
 `psdi_lib` 2.1.0, inchangée depuis `pdf_trans` 1.0.6. Ajouter une clé à ce

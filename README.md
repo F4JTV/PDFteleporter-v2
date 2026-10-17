@@ -26,7 +26,7 @@ psditool/cli.py             CLI headless, aussi le point d'entrée du menu conte
 psditool/shell_windows.py   intégration Explorateur (registre)
 psditool/resources.py       résolution des ressources embarquées
 psditool/gui/               interface PyQt6, style Fusion
-tests/                      117 tests : conteneur, moteur, interopérabilité
+tests/                      178 tests : conteneur, moteur, interopérabilité
 tests/vectors/golden.json   empreintes des archives de référence
 pdfteleporter.py            point d'entrée unique : IHM / menu contextuel / CLI
 pdfteleporter.spec          PyInstaller, deux exécutables depuis une analyse
@@ -59,8 +59,8 @@ sources/psdi_lib.py          moteur 2.1.0 — le même bytecode à une fonction 
 sources/PDFteleporter.py     IHM 2.1.0, PyQt6 (la 1.0.6 était en Tkinter)
 disasm/*.dis                 désassemblages complets, le recours faisant foi
 disasm/*.pyc                 le bytecode extrait lui-même
-bench/bench.json             banc psdi_lib 2.1.0 contre psditool : tailles,
-                             temps, et les 96 recompositions croisées
+bench/bench.json             banc psdi_lib 2.1.0 contre psditool 2.4.0 : tailles,
+                             temps, et les 128 recompositions croisées
 bench/*.diff                 différence instruction par instruction des deux moteurs
 tools/bench.py               le banc — charge psdi_lib depuis son .pyc
 tools/cmp_pyc2.py            comparaison de deux .pyc objet de code par objet de code

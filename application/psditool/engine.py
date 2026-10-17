@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -45,7 +46,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
             "PyMuPDF, so it was never bundled. Rebuild it."
         ) from _exc
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 from . import format as psdi
 from .presets import QUALITY_MEDIUM, QUALITY_PRESETS, estimate_times
@@ -492,6 +493,173 @@ def _encode_jpeg(img: Image.Image, quality: int, allow_grayscale: bool = True) -
     return buf.getvalue()
 
 
+# --- payload codec for the images of a structured archive ---------------------
+# Both decoders hand every image payload of a version 1 archive to MuPDF's
+# insert_image, which identifies the format from the bytes and reads PNG as
+# readily as JPEG. A logo, a chart or a line of outlined text is a few flat
+# colours with sharp edges: exactly what JPEG codes worst, with ringing around
+# every edge, and what a small palette codes best. So each image is offered
+# both ways and the smaller one is kept -- but a palette version only when it
+# is measurably closer to the source than the JPEG it replaces.
+#
+# Version 2 archives (page images) are left as JPEG: on a scan the noise makes
+# any lossless or palette coding several times larger, measured.
+_PALETTE_SIZES = (4, 8, 16, 32, 64, 128, 256)
+# More distinct colours than this is a photograph; no palette will compete.
+_PALETTE_MAX_COLOURS = 4096
+# How much closer to the source a palette image must be than the JPEG, in dB
+# of PSNR. Without a margin, a two-colour rendering of anti-aliased text could
+# edge past a poor JPEG on the metric while looking lighter and thinner.
+_PALETTE_MARGIN_DB = 1.0
+# PNG's own deflate is only worth trying on small images; on large ones the
+# stored form compressed by the container's LZMA always wins.
+_PNG_DEFLATE_MAX_PIXELS = 65536
+# Stored uncompressed, a palette PNG takes a byte per pixel before LZMA, and
+# the reader refuses a payload that expands past MAX_PAYLOAD_SIZE (32 MiB).
+# Eight million pixels -- an A4 page at 340 dpi -- keeps far clear of it.
+_PNG_MAX_PIXELS = 8_000_000
+
+
+def _psnr(reference: Image.Image, candidate: Image.Image) -> float:
+    """Peak signal-to-noise ratio of `candidate` against `reference`, in dB.
+
+    Computed from Pillow's difference histogram, so it needs no numerical
+    library -- numpy is deliberately kept out of the frozen build.
+    """
+    diff = ImageChops.difference(reference, candidate.convert(reference.mode))
+    histogram = diff.histogram()
+    squares = 0
+    for band in range(len(diff.getbands())):
+        counts = histogram[band * 256:(band + 1) * 256]
+        squares += sum(count * value * value for value, count in enumerate(counts))
+    if squares == 0:
+        return 99.0
+    samples = reference.width * reference.height * len(diff.getbands())
+    return 10 * math.log10(255 * 255 * samples / squares)
+
+
+def _image_bytes(img: Image.Image, **options) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, **options)
+    return buf.getvalue()
+
+
+def _own_palette(img: Image.Image, colours: list) -> Image.Image:
+    """Map an image of at most 256 colours onto a palette of those colours.
+
+    Not quite lossless: Pillow maps pixels to palette entries through a cache
+    that folds colours a few levels apart, so (101, 101, 101) may come out as
+    (100, 100, 100). The result is checked like any other candidate.
+    """
+    palette = []
+    for _, rgb in colours:
+        palette.extend(rgb)
+    holder = Image.new("P", (1, 1))
+    holder.putpalette(palette + [0] * (768 - len(palette)))
+    return img.quantize(palette=holder, dither=Image.Dither.NONE)
+
+
+# K-means passes refining the median-cut palette. Median cut averages each
+# colour box, which on anti-aliased text pulls the darkest level towards grey:
+# on the bulletin's axis labels the core of the strokes came out at 126 for a
+# source at 89. Refined, it comes to 108, PSNR rises by about 3 dB at four
+# colours, and the file comes out slightly smaller, not larger. Pillow's
+# k-means converges in one or two passes on these images; more cost the same.
+_PALETTE_KMEANS = 2
+
+
+def _palettes_at(base: Image.Image, size: int, target: float) -> list:
+    """The quantisation of `base` to `size` colours, if it reaches `target` dB.
+
+    Undithered: Pillow applies no dithering when it builds the palette itself,
+    and dithered noise is in any case what LZMA predicts worst.
+    """
+    quantised = base.quantize(colors=size, method=Image.Quantize.MEDIANCUT,
+                              kmeans=_PALETTE_KMEANS)
+    return [quantised] if _psnr(base, quantised) >= target else []
+
+
+def _smallest_palettes(base: Image.Image, n_colours: int, target: float) -> list:
+    """Quantisations at the smallest palette size that reaches `target`.
+
+    Fidelity rises with the palette size, so the size is searched rather than
+    scanned: a first probe at eight colours, where graphics and outlined text
+    usually land, then down while it still passes or up until it does.
+    """
+    sizes = [size for size in _PALETTE_SIZES if size < n_colours]
+    if not sizes:
+        return []
+    index = min(1, len(sizes) - 1)
+    found = _palettes_at(base, sizes[index], target)
+    if found:
+        while index > 0:
+            lower = _palettes_at(base, sizes[index - 1], target)
+            if not lower:
+                break
+            index -= 1
+            found = lower
+    else:
+        while not found and index < len(sizes) - 1:
+            index += 1
+            found = _palettes_at(base, sizes[index], target)
+    return found
+
+
+def _encode_payload(img: Image.Image, quality: int, lzma_preset: int) -> bytes:
+    """Encode one image of a structured archive in its smallest faithful form.
+
+    The JPEG is written both progressive and baseline: the two hold the same
+    coefficients and decode to the same pixels, and on small images the extra
+    scans of a progressive file cost more than they save -- baseline won on
+    two thirds of the images of the WHO bulletin. Then, for anything with few
+    enough colours to be a graphic, a PNG: lossless for a grey image, the
+    image's own colours when it has 256 or fewer, otherwise the smallest
+    palette -- and every one of these only when it beats the JPEG's fidelity
+    by _PALETTE_MARGIN_DB (a grey PNG always does). Sizes are compared as the
+    container will store them, after its optional LZMA, which is what makes
+    an uncompressed PNG the usual winner: LZMA codes raw palette indices
+    better than deflate.
+    """
+    if img.mode == "RGB" and _is_effectively_monochrome(img):
+        img = img.convert("L")
+
+    def stored(payload: bytes) -> int:
+        return len(psdi.pack_payload(payload, lzma_preset)[1])
+
+    best = None
+    for progressive in (True, False):
+        payload = _image_bytes(img, format="JPEG", quality=quality,
+                               optimize=True, progressive=progressive)
+        size = stored(payload)
+        if best is None or size < best[0]:
+            best = (size, payload)
+
+    if img.width * img.height > _PNG_MAX_PIXELS:
+        return best[1]
+    colours = img.getcolors(_PALETTE_MAX_COLOURS)
+    if colours is None:
+        return best[1]
+
+    target = _psnr(img, Image.open(io.BytesIO(best[1]))) + _PALETTE_MARGIN_DB
+    candidates = []
+    if img.mode == "L":
+        candidates.append(img)  # grey PNG: lossless
+    elif len(colours) <= 256:
+        own = _own_palette(img, colours)
+        if _psnr(img, own) >= target:
+            candidates.append(own)
+    candidates.extend(_smallest_palettes(img, len(colours), target))
+
+    levels = (0, 9) if img.width * img.height <= _PNG_DEFLATE_MAX_PIXELS else (0,)
+    for candidate in candidates:
+        for level in levels:
+            payload = _image_bytes(candidate, format="PNG", compress_level=level)
+            size = stored(payload)
+            if size < best[0]:
+                best = (size, payload)
+    return best[1]
+
+
 def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict,
                     placed_pt: tuple[float, float] | None = None):
     """Downscale and re-encode one extracted image.
@@ -550,7 +718,8 @@ def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict,
             if target != img.size:
                 img = img.resize(target, Image.LANCZOS)
 
-    return _encode_jpeg(img, params["jpeg_quality"]), width, height
+    return (_encode_payload(img, params["jpeg_quality"], params["lzma_preset"]),
+            width, height)
 
 
 # Artwork regions are stored as ordinary images, so a decoder written against
@@ -593,14 +762,62 @@ def _axis_lines_from_path_items(items, tolerance: float = 0.6) -> list:
         vertical = abs(x1 - x0) <= tolerance and abs(y1 - y0) > tolerance
         if horizontal or vertical:
             lines.append((x0, y0, x1, y1))
-    return lines
+    return _join_path_segments(lines)
 
 
-def _path_is_only_axis_lines(items) -> bool:
+def _join_path_segments(lines: list) -> list:
+    """Join the collinear segments of one path that touch or overlap.
+
+    One path is stroked once: where its own segments cross or retrace each
+    other the ink goes down a single time. A closed two-point path -- a line
+    and its return -- is the common case, and stored as two entries it was
+    drawn twice, darker than the original. Separate paths are a different
+    matter; see _is_thin.
+    """
+    horizontal: dict = {}
+    vertical: dict = {}
+    others = []
+    for x0, y0, x1, y1 in lines:
+        if y0 == y1:
+            horizontal.setdefault(y0, []).append((min(x0, x1), max(x0, x1)))
+        elif x0 == x1:
+            vertical.setdefault(x0, []).append((min(y0, y1), max(y0, y1)))
+        else:
+            # Nearly but not exactly axis-aligned: only a retrace of the
+            # very same segment is recognised, in either direction.
+            segment = tuple(sorted(((x0, y0), (x1, y1))))
+            if segment not in others:
+                others.append(segment)
+    others = [(a[0], a[1], b[0], b[1]) for a, b in others]
+
+    def joined(spans):
+        spans.sort()
+        out = [list(spans[0])]
+        for lo, hi in spans[1:]:
+            if lo <= out[-1][1]:
+                out[-1][1] = max(out[-1][1], hi)
+            else:
+                out.append([lo, hi])
+        return out
+
+    result = list(others)
+    for y, spans in horizontal.items():
+        result.extend((lo, y, hi, y) for lo, hi in joined(spans))
+    for x, spans in vertical.items():
+        result.extend((x, lo, x, hi) for lo, hi in joined(spans))
+    return result
+
+
+def _path_is_only_axis_lines(items, tolerance: float = 0.6) -> bool:
     """A path made solely of horizontal and vertical strokes is structure."""
     if not items or any(item[0] != "l" for item in items):
         return False
-    return len(_axis_lines_from_path_items(items)) == len(items)
+    for item in items:
+        dx = abs(item[2].x - item[1].x)
+        dy = abs(item[2].y - item[1].y)
+        if not ((dy <= tolerance < dx) or (dx <= tolerance < dy)):
+            return False
+    return True
 
 
 def _path_is_artwork(items) -> bool:
@@ -631,6 +848,549 @@ def _path_is_artwork(items) -> bool:
     rects = _rects_from_path_items(items)
     segments = sum(1 for item in items if item[0] == "l")
     return segments > 0 and len(rects) * 4 < segments
+
+
+# --- drawing entries -----------------------------------------------------------
+# Both decoders, the original's and this one, draw every "dr" entry of type
+# "rect" the same way: draw_rect(entry["r"]), then finish(color=c, fill=f,
+# width=w if w > 0.1 else 0). Everything below emits only entries of that
+# shape, so whatever it produces renders the same on a station running the
+# original version.
+
+# A filled rectangle thinner than this is a rule or a cell border, not an area.
+_RULE_MAX_THICKNESS = 2.0
+# Thinner than this, a rule stays a fill: both decoders draw a stroke of 0.1 pt
+# or less as a one-pixel hairline, darker than the sliver the source paints.
+_RULE_MIN_THICKNESS = 0.15
+# Bucket size, in points, for the overlap queries made while compacting.
+_DRAW_GRID = 32.0
+# Each compaction pass can only remove entries; four reach the fixed point on
+# every document measured, the last one finding nothing.
+_COMPACT_PASSES = 4
+_WHITE = "#ffffff"
+
+
+def _stroke_width(width: float):
+    """The "w" to store for a stroke of `width` points, or None for a hairline.
+
+    Both decoders draw "w" only when it is above 0.1, and a one-pixel hairline
+    otherwise. A tenth of a point is resolution enough for any stroke but the
+    ones just above that threshold: 0.12 rounded to 0.1 used to come out as a
+    hairline, several times darker at 150 dpi. Those keep two decimals.
+    """
+    if width <= 0.1:
+        return None
+    if width < 0.15:
+        return max(round(width, 2), 0.11)
+    return round(width, 1)
+
+
+def _rule_entry(x0: float, y0: float, x1: float, y1: float, colour: str,
+                width: float, precision: int) -> dict:
+    """Describe a straight rule as a stroked rectangle of zero height or width.
+
+    Rules used to be stored two ways, each lossy somewhere. As "line" entries
+    they were invisible to the original decoder, which skips every entry that
+    is not a "rect": a LibreOffice table reached a station running it without
+    a single border. As thin filled rectangles they did not survive whole-
+    point coordinates: an Excel border 0.84 pt thick rounded to either 1 pt or
+    to nothing, and a fifth of the borders on a test sheet vanished at the two
+    low presets.
+
+    A rectangle with no height, stroked in the rule's colour and thickness,
+    paints the band [x0, x1] x [y - w/2, y + w/2]: the same pixels as a butt-
+    capped line, measured identical from 150 to 600 dpi. It is an ordinary
+    "rect", so both decoders draw it. The thickness travels in "w" at a tenth
+    of a point whatever the coordinate precision, so rounding the position can
+    move a rule by half a point but can no longer thin it out of existence.
+    """
+    if abs(x1 - x0) >= abs(y1 - y0):
+        centre = (y0 + y1) / 2
+        box = (min(x0, x1), centre, max(x0, x1), centre)
+    else:
+        centre = (x0 + x1) / 2
+        box = (centre, min(y0, y1), centre, max(y0, y1))
+    entry = {"t": "rect", "r": _quantize_box(box, precision), "c": colour}
+    stroke = _stroke_width(width)
+    if stroke is not None:
+        entry["w"] = stroke
+    return entry
+
+
+def _drawing_kind(entry: dict) -> str:
+    """Classify a drawing entry: a plain fill, a rule, or anything else."""
+    if entry.get("t") != "rect":
+        return "other"
+    x0, y0, x1, y1 = entry["r"]
+    if "f" in entry and "c" not in entry:
+        return "fill"
+    if "c" in entry and "f" not in entry and (x0 == x1 or y0 == y1):
+        return "rule"
+    return "other"
+
+
+def _drawing_footprint(entry: dict) -> tuple:
+    """The area an entry can paint, widened by half its stroke if it has one.
+
+    A hairline (no "w") is drawn one device pixel wide whatever the zoom, which
+    at thumbnail scale is wider than a point; it is given a point either side.
+    Generous margins only make the overlap tests below more cautious.
+    """
+    x0, y0, x1, y1 = entry["r"]
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    if "c" in entry or entry.get("t") == "line":
+        pad = max(entry["w"] / 2, 0.5) if "w" in entry else 1.0
+        return (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+    return (x0, y0, x1, y1)
+
+
+def _paints_nothing(kind: str, box) -> bool:
+    """A fill or a rule that has shrunk to a point puts no ink on the page.
+
+    A fill with width but no height is kept: MuPDF still draws it as a faint
+    one-pixel line, much as the source drew the sliver it came from.
+    """
+    x0, y0, x1, y1 = box
+    if kind in ("fill", "rule"):
+        return x0 == x1 and y0 == y1
+    return False
+
+
+def _is_thin(kind: str, box) -> bool:
+    """Report whether painting this entry twice would show on screen.
+
+    Opaque paint applied twice looks the same as once -- except where it only
+    partly covers a pixel. A rule or a fill under _RULE_MAX_THICKNESS is
+    narrower than a pixel or two at screen zoom, so its whole length is that
+    kind of pixel: drawn twice, it comes out visibly darker. LibreOffice draws
+    every inner border twice, once per adjacent cell, and the original looks
+    the darker for it; collapsing the copies made those borders a shade lighter
+    than the original at 100 %. Thin entries are therefore only ever joined
+    end to end, never folded over one another.
+    """
+    if kind == "rule":
+        return True
+    x0, y0, x1, y1 = box
+    return min(x1 - x0, y1 - y0) < _RULE_MAX_THICKNESS
+
+
+def _union_box(kind: str, a, b):
+    """The union of two boxes of one kind when it is itself such a box.
+
+    Fills join when they share a full edge or overlap along a row or column.
+    Rules join when they lie on the same line and touch. Thin entries must
+    meet exactly end to end; thicker ones may also overlap, which changes at
+    most the anti-aliasing of a few edge pixels. Anything else returns None:
+    the union would paint pixels neither entry painted, or paint once what
+    the source painted twice.
+    """
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    thin = _is_thin(kind, a) or _is_thin(kind, b)
+
+    def joins(lo_a, hi_a, lo_b, hi_b) -> bool:
+        if thin:
+            return hi_a == lo_b or hi_b == lo_a
+        return lo_a <= hi_b and lo_b <= hi_a
+
+    if kind == "fill":
+        if ay0 == by0 and ay1 == by1 and joins(ax0, ax1, bx0, bx1):
+            return [min(ax0, bx0), ay0, max(ax1, bx1), ay1]
+        if ax0 == bx0 and ax1 == bx1 and joins(ay0, ay1, by0, by1):
+            return [ax0, min(ay0, by0), ax1, max(ay1, by1)]
+        return None
+    if ay0 == ay1 == by0 == by1 and joins(ax0, ax1, bx0, bx1):
+        return [min(ax0, bx0), ay0, max(ax1, bx1), ay1]
+    if ax0 == ax1 == bx0 == bx1 and joins(ay0, ay1, by0, by1):
+        return [ax0, min(ay0, by0), ax1, max(ay1, by1)]
+    return None
+
+
+def _index_keys(kind: str, style: tuple, box) -> list:
+    """Keys under which an entry can be found by a later one joining it.
+
+    Thin entries only ever join end to end, so they are filed by their two
+    ends: a later piece finds its neighbour in one lookup instead of testing
+    every piece on the same line. Fills are also filed by row and column,
+    where thicker ones may join overlapping.
+    """
+    x0, y0, x1, y1 = box
+    if kind == "rule":
+        if y0 == y1:
+            return [(style, "h", y0, "end", x1), (style, "h", y0, "start", x0)]
+        return [(style, "v", x0, "end", y1), (style, "v", x0, "start", y0)]
+    return [
+        (style, "row", y0, y1), (style, "col", x0, x1),
+        (style, "row", y0, y1, "end", x1), (style, "row", y0, y1, "start", x0),
+        (style, "col", x0, x1, "end", y1), (style, "col", x0, x1, "start", y0),
+    ]
+
+
+def _query_keys(kind: str, style: tuple, box) -> list:
+    """Keys under which an entry looks for earlier ones it could join."""
+    x0, y0, x1, y1 = box
+    if kind == "rule":
+        if y0 == y1:
+            return [(style, "h", y0, "end", x0), (style, "h", y0, "start", x1)]
+        return [(style, "v", x0, "end", y0), (style, "v", x0, "start", y1)]
+    if _is_thin(kind, box):
+        return [
+            (style, "row", y0, y1, "end", x0), (style, "row", y0, y1, "start", x1),
+            (style, "col", x0, x1, "end", y0), (style, "col", x0, x1, "start", y1),
+        ]
+    return [(style, "row", y0, y1), (style, "col", x0, x1)]
+
+
+def _grid_cells(footprint, limits=None):
+    """The grid cells a footprint touches, within `limits` when given.
+
+    Only what lies on the page can be seen, so cells beyond it are never
+    visited: an off-page fill a hundred thousand points wide would otherwise
+    cost millions of cells. Two entries can only be told apart by what they
+    paint on the page, where both are still indexed.
+    """
+    x0, y0, x1, y1 = footprint
+    gx0, gy0 = int(x0 // _DRAW_GRID), int(y0 // _DRAW_GRID)
+    gx1, gy1 = int(x1 // _DRAW_GRID), int(y1 // _DRAW_GRID)
+    if limits is not None:
+        lx0, ly0, lx1, ly1 = limits
+        gx0, gy0 = max(gx0, lx0), max(gy0, ly0)
+        gx1, gy1 = min(gx1, lx1), min(gy1, ly1)
+    for cx in range(gx0, gx1 + 1):
+        for cy in range(gy0, gy1 + 1):
+            yield cx, cy
+
+
+def _compact_once(entries: list, bounds=None) -> list:
+    """One pass of `_compact_drawings`; see there."""
+    out: list = []          # kept entries, None once superseded
+    styles: list = []
+    prints: list = []
+    grid: dict = {}
+    keys: dict = {}
+    exact: dict = {}
+    limits = None
+    if bounds is not None:
+        # One cell of margin: a stroke straddling the edge is still indexed.
+        limits = (int(bounds[0] // _DRAW_GRID) - 1, int(bounds[1] // _DRAW_GRID) - 1,
+                  int(bounds[2] // _DRAW_GRID) + 1, int(bounds[3] // _DRAW_GRID) + 1)
+
+    def index_entry(i: int) -> None:
+        for cell in _grid_cells(prints[i], limits):
+            grid.setdefault(cell, []).append(i)
+        kind = styles[i][0]
+        if kind in ("fill", "rule"):
+            box = out[i]["r"]
+            for key in _index_keys(kind, styles[i], box):
+                keys.setdefault(key, []).append(i)
+            exact[(styles[i], tuple(box))] = i
+
+    def painted_after(footprint, after: int, style=None) -> bool:
+        """Is anything drawn after index `after` overlapping `footprint`?
+
+        Entries in `style` are ignored: they paint the same colour, so the
+        order between them and the one being moved cannot show. Touching
+        edges count as overlap, to keep anti-aliased borders untouched.
+        """
+        seen = set()
+        for cell in _grid_cells(footprint, limits):
+            for j in grid.get(cell, ()):
+                if j <= after or j in seen or out[j] is None:
+                    continue
+                seen.add(j)
+                if style is not None and styles[j] == style:
+                    continue
+                o = prints[j]
+                if (o[0] <= footprint[2] and footprint[0] <= o[2]
+                        and o[1] <= footprint[3] and footprint[1] <= o[3]):
+                    return True
+        return False
+
+    for entry in entries:
+        kind = _drawing_kind(entry)
+        box = list(entry["r"])
+        style = (kind, entry.get("f"), entry.get("c"), entry.get("w"))
+
+        if kind in ("fill", "rule"):
+            if _paints_nothing(kind, box):
+                continue
+            footprint = _drawing_footprint(entry)
+
+            # White painted on blank paper: the page is already that colour,
+            # and text and images are drawn after every rectangle, so it
+            # cannot hide anything either.
+            if (kind == "fill" and entry["f"] == _WHITE
+                    and not painted_after(footprint, -1)):
+                continue
+
+            # An identical entry drawn earlier is repainted by this one, so
+            # one copy goes: this one if nothing came in between, otherwise
+            # the earlier one, since this later copy is what ends up on top.
+            # Not for thin entries, whose second coat shows (see _is_thin).
+            previous = exact.get((style, tuple(box)))
+            if (previous is not None and out[previous] is not None
+                    and not _is_thin(kind, box)):
+                if not painted_after(footprint, previous, style):
+                    continue
+                out[previous] = None
+
+            # Grow an earlier entry of the same style instead of adding this
+            # one, but only if moving this entry's paint down to that earlier
+            # position cannot change what is visible: nothing of another
+            # style drawn in between may overlap it. Candidates are tried
+            # from the most recent; once one is blocked, every older one is.
+            merged = False
+            candidates = sorted(
+                {i for key in _query_keys(kind, style, box)
+                 for i in keys.get(key, ()) if out[i] is not None},
+                reverse=True,
+            )
+            for i in candidates:
+                union = _union_box(kind, out[i]["r"], box)
+                if union is None:
+                    continue
+                if painted_after(footprint, i, style):
+                    break
+                exact.pop((style, tuple(out[i]["r"])), None)
+                out[i]["r"] = union
+                prints[i] = _drawing_footprint(out[i])
+                index_entry(i)
+                merged = True
+                break
+            if merged:
+                continue
+        else:
+            footprint = _drawing_footprint(entry)
+
+        kept = dict(entry)
+        kept["r"] = box
+        out.append(kept)
+        styles.append(style)
+        prints.append(footprint)
+        index_entry(len(out) - 1)
+
+    return [entry for entry in out if entry is not None]
+
+
+def _compact_drawings(entries: list, bounds=None, precision: int = 1) -> list:
+    """Shorten a page's drawing list without changing what it paints.
+
+    On a spreadsheet export the drawing list is most of the archive: Excel
+    draws every cell border as its own thin rectangle and LibreOffice every
+    cell edge as its own stroke, so one table line arrives as a dozen
+    abutting pieces. On two real situation sheets the drawings were 75 % of
+    the archive for the Excel export and 52 % for the LibreOffice one.
+
+    Three reductions, then a reordering:
+
+    * pieces of one style that tile a longer rectangle or line are joined
+      -- thin ones only end to end, see _is_thin;
+    * a fill duplicated later supersedes the earlier copy;
+    * white fills on blank paper, and fills or rules too small to put any
+      ink down after rounding, are dropped;
+    * runs of one colour are sorted by position, and four rules closing a
+      rectangle become that rectangle, see _order_colour_runs.
+
+    Draw order is what makes this delicate: entries paint over one another,
+    so an entry may only be folded into an earlier one when nothing of a
+    different style is painted in between over the part that moves. The
+    check is conservative -- touching counts as overlapping -- and the
+    result is still an ordinary list of "rect" entries any decoder reads.
+    What may change is the anti-aliasing of the seam where two pieces met:
+    joined, they no longer show the faint line the renderer leaves between
+    abutting shapes.
+    """
+    current = entries
+    for _ in range(_COMPACT_PASSES):
+        compacted = _compact_once(current, bounds)
+        if len(compacted) == len(current):
+            break
+        current = compacted
+    else:
+        compacted = current
+    return _order_colour_runs(compacted, _frame_tolerance(precision))
+
+
+def _drawing_sort_key(entry: dict) -> tuple:
+    """Rules by width, then direction, then position; everything else by position."""
+    x0, y0, x1, y1 = entry["r"]
+    if "c" in entry and "f" not in entry:
+        width = entry.get("w", 0)
+        if y0 == y1:
+            return (0, width, 0, y0, x0, x1)
+        if x0 == x1:
+            return (0, width, 1, x0, y0, y1)
+        return (1, width, 2, y0, x0, y1, x1)
+    return (2, 0, 2, y0, x0, y1, x1)
+
+
+def _paint_colour(entry: dict):
+    """The one colour an entry paints, or None when it paints two."""
+    if entry.get("t") != "rect":
+        return None
+    if "f" in entry and "c" not in entry:
+        return entry["f"]
+    if "c" in entry and "f" not in entry:
+        return entry["c"]
+    return None
+
+
+def _order_colour_runs(entries: list, frame_tolerance: float) -> list:
+    """Order each run of consecutive single-colour entries by position.
+
+    Paint of a single colour composites the same in any order -- coverage a
+    then b gives 1 - (1 - a)(1 - b) either way -- whatever shape or stroke
+    width lays it down, so entries can be reordered freely within a run that
+    nothing of another colour interrupts. Sorted, consecutive entries repeat
+    their row or column coordinate and step along the other, which LZMA codes
+    far more cheaply than the producer's cell-by-cell order: 4 to 7 % off the
+    whole archive on the two spreadsheet exports. Runs used to stop at a
+    change of stroke width; on the LibreOffice export, whose borders alternate
+    between three widths of black, letting them run on saved another 2 %.
+
+    Within a run, four rules that close a rectangle become that rectangle,
+    see _frames_from_rules.
+
+    An entry with both a fill and a stroke paints two colours, and two such
+    entries that overlap do not commute -- the second one's fill covers the
+    first one's border. Those keep their place and break the run.
+    """
+    out: list = []
+    run: list = []
+    colour = None
+
+    def flush() -> None:
+        out.extend(sorted(_frames_from_rules(run, frame_tolerance),
+                          key=_drawing_sort_key))
+
+    for entry in entries:
+        paint = _paint_colour(entry)
+        if paint is None:
+            flush()
+            run = []
+            colour = None
+            out.append(entry)
+            continue
+        if run and paint != colour:
+            flush()
+            run = []
+        run.append(entry)
+        colour = paint
+    flush()
+    return out
+
+
+def _frame_tolerance(precision: int) -> float:
+    """How far four rules may miss a rectangle's outline and still become it.
+
+    One rounding step at a tenth of a point. At whole points the rules' ends
+    are rounded but their thickness is not, so an end meets the outline only
+    to within half a stroke: 0.2 pt for the usual table border.
+    """
+    return 0.11 if precision >= 1 else 0.21
+
+
+def _frames_from_rules(entries: list, tolerance: float) -> list:
+    """Replace each set of four rules closing a rectangle with that rectangle.
+
+    LibreOffice draws a cell's inner frame as four separate strokes; a stroked
+    rectangle draws the same four sides, joined at the corners, in one entry
+    with four numbers instead of four entries with twelve. On the LibreOffice
+    situation sheet, 219 frames took 876 rules and 9 % off the archive.
+
+    The sides keep their exact positions. Only the corners can differ: a side
+    that stopped short of the outline or ran past it by up to `tolerance`
+    now ends exactly on it, and the corner square is painted once where the
+    two crossing rules painted it twice. Measured on the four pages of that
+    sheet, the drawings render with a mean difference to the original under
+    a thousandth of a grey level, and the two versions cannot be told apart
+    at 1000 %.
+
+    Every entry passed in must paint the same colour, so that the frame can
+    stand anywhere in the list; the four rules must share a stroke width.
+
+    Rules are indexed by where they start, so each lookup below inspects a
+    handful of buckets of a tenth of a point, however many rules the page
+    holds.
+    """
+    horizontal: dict = {}   # (width, y, x0) buckets -> indices
+    vertical: dict = {}     # (width, x, y0) buckets -> indices
+    tops: list = []
+    for index, entry in enumerate(entries):
+        if _drawing_kind(entry) != "rule":
+            continue
+        x0, y0, x1, y1 = entry["r"]
+        width = entry.get("w")
+        if y0 == y1 and x0 < x1:
+            horizontal.setdefault((width, round(y0 * 10), round(x0 * 10)), []).append(index)
+            tops.append(index)
+        elif x0 == x1 and y0 < y1:
+            vertical.setdefault((width, round(x0 * 10), round(y0 * 10)), []).append(index)
+    if not tops or not vertical:
+        return entries
+
+    used: set = set()
+    frames: dict = {}
+    reach = int(tolerance * 10) + 1   # buckets to search either side
+    span = range(-reach, reach + 1)
+
+    def near(table: dict, width, along: float, start: float):
+        """Unused rules of `width` in the buckets around (along, start)."""
+        a, s = round(along * 10), round(start * 10)
+        for da in span:
+            for ds in span:
+                for index in table.get((width, a + da, s + ds), ()):
+                    if index not in used:
+                        yield index
+
+    tops.sort(key=lambda i: (entries[i]["r"][1], entries[i]["r"][0]))
+    for top_index in tops:
+        if top_index in used:
+            continue
+        a, top, b, _ = entries[top_index]["r"]
+        width = entries[top_index].get("w")
+        half = (width or 0) / 2
+        best = None
+        for left in near(vertical, width, a + half, top - half):
+            lx, ly0, _, ly1 = entries[left]["r"]
+            bottom = ly1 - half
+            if (abs(lx - (a + half)) > tolerance or abs(ly0 - (top - half)) > tolerance
+                    or bottom - top <= (width or 0)):
+                continue
+            for right in near(vertical, width, b - half, top - half):
+                if right == left:
+                    continue
+                rx, ry0, _, ry1 = entries[right]["r"]
+                if (abs(rx - (b - half)) > tolerance or abs(ry0 - (top - half)) > tolerance
+                        or rx - lx <= (width or 0)):
+                    continue
+                for bottom_index in near(horizontal, width, bottom, a):
+                    if bottom_index == top_index:
+                        continue
+                    ba, by, bb, _ = entries[bottom_index]["r"]
+                    if (abs(ba - a) > tolerance or abs(bb - b) > tolerance
+                            or abs(ly1 - (by + half)) > tolerance
+                            or abs(ry1 - (by + half)) > tolerance
+                            or by - top <= (width or 0)):
+                        continue
+                    if best is None or by < best[0]:
+                        best = (by, bottom_index, left, right)
+        if best is None:
+            continue
+        bottom, bottom_index, left, right = best
+        frame = {"t": "rect",
+                 "r": [entries[left]["r"][0], top, entries[right]["r"][0], bottom],
+                 "c": entries[top_index]["c"]}
+        if width is not None:
+            frame["w"] = width
+        used.update((top_index, bottom_index, left, right))
+        frames[top_index] = frame
+
+    if not frames:
+        return entries
+    return [frames.get(index, entry) for index, entry in enumerate(entries)
+            if index not in used or index in frames]
 
 
 def _merge_boxes(boxes: list, pad: float = 8.0) -> list:
@@ -996,6 +1756,127 @@ def _split_span_runs(span) -> list:
     return out
 
 
+# Span keys that make two spans render differently. Spans equal on all of them
+# render as one run of text when nothing separates them.
+_SPAN_STYLE_KEYS = ("f", "fa", "sz", "c")
+
+
+def _merge_adjacent_spans(spans: list, line_box) -> list:
+    """Join consecutive spans of one style that the reader sets as one run.
+
+    LibreOffice draws the "ti" and "tt" ligatures from a separate font, so a
+    word such as "Identité" reaches the extraction as three spans -- "Iden",
+    "ti", "té" -- each with its own box. Both decoders put them back on the
+    line side by side in one HTML box: the original concatenates every span
+    of a line, and this one groups spans no further apart than
+    _SPAN_SPLIT_RATIO of the font size (see _draw_line). Joined by that same
+    rule they produce the same HTML less two tag boundaries, and the same
+    page, measured pixel for pixel through both decoders. On the
+    LibreOffice situation sheet the boxes of these fragments were a tenth of
+    the archive.
+    """
+    merged: list = []
+    previous_end = None
+    for span in spans:
+        box = span.get("b", line_box)
+        size = span.get("sz", 8)
+        # The reader measures the gap to the next span from the right edge of
+        # the last one, so a fragment is only joined when it ends the run:
+        # the joined box then ends where the last fragment did.
+        if (merged and previous_end is not None
+                and box[0] - previous_end <= max(1.0, _SPAN_SPLIT_RATIO * size)
+                and box[2] >= merged[-1].get("b", line_box)[2]
+                and all(merged[-1].get(key) == span.get(key)
+                        for key in _SPAN_STYLE_KEYS)):
+            last = merged[-1]
+            last_box = last.get("b", line_box)
+            last["t"] += span["t"]
+            last["b"] = [min(last_box[0], box[0]), min(last_box[1], box[1]),
+                         max(last_box[2], box[2]), max(last_box[3], box[3])]
+        else:
+            merged.append(dict(span))
+        previous_end = box[2]
+    return merged
+
+
+# The base-14 faces behind the decoders' CSS families, by family and style key.
+# MuPDF lays out "Helvetica" with Nimbus Sans, which is what these load, so
+# Font.text_length gives the width the HTML layout will use: checked equal to
+# the laid-out width on 600 lines of the four test documents.
+_BASE14_FACES = {
+    ("s", "R"): "helv", ("s", "B"): "hebo", ("s", "I"): "heit", ("s", "BI"): "hebi",
+    ("t", "R"): "tiro", ("t", "B"): "tibo", ("t", "I"): "tiit", ("t", "BI"): "tibi",
+    ("m", "R"): "cour", ("m", "B"): "cobo", ("m", "I"): "coit", ("m", "BI"): "cobi",
+}
+# Slack kept between the text and the box edge before the edge is declared
+# irrelevant, in points.
+_FIT_MARGIN = 0.01
+
+
+def _text_width(faces: dict, key: tuple, text: str, size: float) -> float | None:
+    """Width of `text` set in the base-14 face for `key`, or None if it lacks a glyph.
+
+    Sums cached per-character advances: identical to Font.text_length, which
+    costs a quarter of a millisecond per call, against microseconds here.
+    """
+    entry = faces.get(key)
+    if entry is None:
+        entry = faces[key] = (fitz.Font(_BASE14_FACES[key]), {})
+    face, advances = entry
+    total = 0.0
+    for char in text:
+        advance = advances.get(char)
+        if advance is None:
+            code = ord(char)
+            advance = advances[char] = face.glyph_advance(code) if face.has_glyph(code) else -1.0
+        if advance < 0:
+            return None
+        total += advance
+    return total * size
+
+
+def _open_line_box(line: dict, page_w: float, page_h: float, precision: int,
+                   faces: dict) -> list:
+    """The box to store for a line, opened to the page corner when it can be.
+
+    Both decoders lay a line out in an HTML box built from its stored box:
+    left and top place the text, and right and bottom only decide whether it
+    fits -- when it does not, it is scaled down to fit. A line whose text
+    already fits at full size is therefore drawn identically in any larger
+    box, and the page's own bottom-right corner is the largest: one value
+    repeated on every such line, which LZMA codes for almost nothing, instead
+    of two fresh coordinates per line. On the situation sheets the right and
+    bottom edges were a sixth of the archive.
+
+    Only lines of a single span qualify, set in a face that has every glyph
+    (a substituted font would lay out at another width), whose text fits the
+    stored box at full size with _FIT_MARGIN to spare. Lines that are scaled
+    down keep their exact box, since there the box sets the scale.
+    """
+    box = line["b"]
+    spans = line.get("s", [])
+    if len(spans) != 1 or "b" in spans[0]:
+        return box
+    span = spans[0]
+    key = (span.get("fa", "s"), span.get("f", "R"))
+    text = span.get("t", "")
+    if key not in _BASE14_FACES or not text:
+        return box
+    needed = _text_width(faces, key, text, span.get("sz", 8))
+    if needed is None:
+        return box
+    x0, y0, x1, y1 = box
+    right = _quantize(page_w, precision)
+    bottom = _quantize(page_h, precision)
+    # Both decoders widen the box by half a point on each side. The new box
+    # must also contain the old one: the original decoder clips each line to
+    # its box, so a smaller one could cut off a descender.
+    if (needed > x1 - x0 + 1.0 - _FIT_MARGIN
+            or right < x1 or bottom < y1):
+        return box
+    return [x0, y0, right, bottom]
+
+
 def _covered(box, regions) -> bool:
     """Report whether a box lies inside an already-rasterised region."""
     if not regions:
@@ -1012,7 +1893,7 @@ def _covered(box, regions) -> bool:
 
 def _extract_page(page, page_idx: int, images_data: dict,
                   precision: int = 1, artwork: list | None = None,
-                  bad_fonts: set | None = None) -> dict:
+                  bad_fonts: set | None = None, faces: dict | None = None) -> dict:
     """Build the manifest entry for one page.
 
     Content falling inside a rasterised artwork region is skipped: it is
@@ -1026,11 +1907,18 @@ def _extract_page(page, page_idx: int, images_data: dict,
     # --- text -------------------------------------------------------------
     # rawdict rather than dict: only per-character boxes reveal where a span's
     # glyphs actually sit, which is what table columns depend on.
+    #
+    # Every line of the page goes into one block. Neither decoder gives blocks
+    # any meaning -- both draw line by line -- and each block costs its own
+    # wrapper in the manifest: 1 to 2 % of the archive on the test documents.
+    out_block: dict = {"l": []}
+    # Base-14 faces and their glyph advances, shared by every page of a
+    # document when the caller passes one dict along.
+    faces = faces if faces is not None else {}
     for block in page.get_text("rawdict").get("blocks", []):
         if block.get("type") != 0:
             continue
 
-        out_block: dict = {"l": []}
         for line in block.get("lines", []):
             if _covered(line["bbox"], artwork):
                 continue
@@ -1076,10 +1964,21 @@ def _extract_page(page, page_idx: int, images_data: dict,
             # single largest redundancy in the manifest.
             if len(out_line["s"]) == 1:
                 out_line["s"][0].pop("b", None)
+            else:
+                spans = _merge_adjacent_spans(out_line["s"], out_line["b"])
+                # Joined into one, the span box goes too -- but only if it
+                # spans the line exactly, since this reader then uses the
+                # line box in its place.
+                if (len(spans) == 1 and spans[0]["b"][0] == out_line["b"][0]
+                        and spans[0]["b"][2] == out_line["b"][2]):
+                    del spans[0]["b"]
+                out_line["s"] = spans
+            out_line["b"] = _open_line_box(out_line, page.rect.width,
+                                           page.rect.height, precision, faces)
             out_block["l"].append(out_line)
 
-        if out_block["l"]:
-            page_data["tb"].append(out_block)
+    if out_block["l"]:
+        page_data["tb"].append(out_block)
 
     # --- image placements -------------------------------------------------
     seen: set[str] = set()
@@ -1094,11 +1993,15 @@ def _extract_page(page, page_idx: int, images_data: dict,
         if key in seen:
             continue
         seen.add(key)
-        page_data["ir"].append(
-            {"x": str(xref), "b": _quantize_box(bbox, precision)}
-        )
+        box = _quantize_box(bbox, precision)
+        if box[2] <= box[0] or box[3] <= box[1]:
+            # Narrower than the rounding: nothing to see, and insert_image
+            # refuses an empty rectangle outright.
+            continue
+        page_data["ir"].append({"x": str(xref), "b": box})
 
     # --- vector rectangles and rules -----------------------------------------
+    drawings: list = []
     page_area = abs(page.rect.width * page.rect.height) or 1.0
     for path in page.get_drawings():
         fill = path.get("fill")
@@ -1109,29 +2012,35 @@ def _extract_page(page, page_idx: int, images_data: dict,
         width = path.get("width", 0) or 0
         items = path.get("items", [])
 
-        # Straight rules first: a path that is only axis-aligned strokes is
-        # emitted as "line" entries. Stored in the same "dr" list as the
-        # rectangles, with a different "t", because the original decoder
-        # walks that list with `if d['t'] != 'rect': continue` -- it steps
-        # over these cleanly instead of failing on an unknown page key.
-        if color is not None and _path_is_only_axis_lines(items):
+        # Straight rules first: a path that is only axis-aligned strokes is a
+        # set of borders or dividers, each stored as a stroked zero-height
+        # rectangle (see _rule_entry), which every decoder draws. A filled
+        # one that closes into rectangles goes through the rectangle branch
+        # below, which keeps fill and stroke together. Any other filled
+        # outline keeps its strokes; its fill has no rectangle to go in.
+        if (color is not None and _path_is_only_axis_lines(items)
+                and (fill is None or not _rects_from_path_items(items))):
             for x0, y0, x1, y1 in _axis_lines_from_path_items(items):
                 seg = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
                 if _covered(seg + (-1, -1, 1, 1), artwork):
                     continue
-                entry = {
-                    "t": "line",
-                    "r": _quantize_box((x0, y0, x1, y1), precision),
-                    "c": _color_to_hex(color),
-                }
-                if width > 0.1:
-                    entry["w"] = round(width, 1)
-                page_data["dr"].append(entry)
+                drawings.append(_rule_entry(
+                    x0, y0, x1, y1, _color_to_hex(color), width, precision,
+                ))
             continue
 
         for rect in _rects_from_path_items(items):
             rect = fitz.Rect(rect).normalize()
-            if rect.is_empty or rect.is_infinite:
+            if rect.is_infinite:
+                continue
+            if rect.is_empty:
+                # Stroked, a rectangle of no height is a line, and the source
+                # draws it; filled only, it paints nothing.
+                if color is not None and not _covered(rect + (-1, -1, 1, 1), artwork):
+                    drawings.append(_rule_entry(
+                        rect.x0, rect.y0, rect.x1, rect.y1,
+                        _color_to_hex(color), width, precision,
+                    ))
                 continue
 
             # A near-page-size dark fill is almost always a scanner ink layer
@@ -1145,14 +2054,38 @@ def _extract_page(page, page_idx: int, images_data: dict,
             if _covered(rect, artwork):
                 continue
 
+            thickness = min(rect.width, rect.height)
+            if (precision <= 0 and fill is not None and color is None
+                    and _RULE_MIN_THICKNESS <= thickness < _RULE_MAX_THICKNESS):
+                # A thin plain fill is a border. At whole-point coordinates
+                # it is stored as a rule, so its thickness survives the
+                # rounding (see _rule_entry). At a tenth of a point the fill
+                # already keeps it, in fewer bytes and closer to the source:
+                # measured on the Excel sheet, the rule form cost 7 % more
+                # there and drifted further from the original rendering.
+                drawings.append(_rule_entry(
+                    rect.x0, rect.y0, rect.x1, rect.y1,
+                    _color_to_hex(fill), thickness, precision,
+                ))
+                continue
+
             entry = {"t": "rect", "r": _quantize_box(rect, precision)}
             if fill is not None:
                 entry["f"] = _color_to_hex(fill)
             if color is not None:
                 entry["c"] = _color_to_hex(color)
-            if width > 0.1:
-                entry["w"] = round(width, 1)
-            page_data["dr"].append(entry)
+                # A stroke width means nothing without a stroke colour.
+                stroke = _stroke_width(width)
+                if stroke is not None:
+                    entry["w"] = stroke
+            drawings.append(entry)
+
+    # Compacted after rounding: at whole-point precision the rounding itself
+    # makes many border pieces meet exactly, which lets them join. Measured
+    # against compacting on a tenth-of-a-point grid first and rounding after,
+    # this gave smaller archives and renderings closer to the source on all
+    # four test documents.
+    page_data["dr"] = _compact_drawings(drawings, tuple(page.rect), precision)
 
     # --- hyperlinks ---------------------------------------------------------
     # Stored under a page key the original decoder never reads, so it is
@@ -1211,7 +2144,7 @@ def _render_region(page, region, params: dict) -> bytes | None:
         if pix.width < 2 or pix.height < 2:
             return None
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        return _encode_jpeg(img, params["jpeg_quality"])
+        return _encode_payload(img, params["jpeg_quality"], params["lzma_preset"])
     except Exception:  # noqa: BLE001
         log.debug("Could not rasterise region %s", region, exc_info=True)
         return None
@@ -1299,6 +2232,7 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
         # Artwork identifiers are handed out downwards from the top of the
         # range so they can never meet a real xref coming up from below.
         next_artwork_id = _ARTWORK_ID_TOP
+        faces: dict = {}
 
         for page_idx, page in enumerate(doc):
             regions = [] if skip_images else _artwork_regions(page)
@@ -1323,7 +2257,7 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
 
             page_data = _extract_page(page, page_idx, images_data,
                                       params.get("coord_precision", 1),
-                                      [r for _, r in rendered])
+                                      [r for _, r in rendered], faces=faces)
 
             # Placed after extraction so the artwork sits above the fills and
             # below the text, exactly where the original drew it.
@@ -1613,8 +2547,18 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes
 
             for ref in page_data.get("ir", []):
                 payload = images.get(ref["x"])
-                if payload:
-                    page.insert_image(fitz.Rect(ref["b"]), stream=payload)
+                rect = fitz.Rect(ref["b"])
+                if not payload or rect.is_empty or rect.is_infinite:
+                    # 2.2.x could round a sliver of an image to zero width,
+                    # and insert_image raises on an empty rectangle: one
+                    # invisible placement used to abort the whole rebuild.
+                    continue
+                try:
+                    page.insert_image(rect, stream=payload)
+                except Exception:  # noqa: BLE001
+                    # An undecodable payload costs that image, not the page.
+                    log.warning("Image %s could not be placed on page %d",
+                                ref["x"], page_no, exc_info=True)
             progress.advance(_COST_REBUILD_PAGE, f"{label}…")
 
             line_total = line_counts[page_no - 1]

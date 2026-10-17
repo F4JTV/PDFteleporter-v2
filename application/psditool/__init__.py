@@ -1,3 +1,3 @@
 """PDF Teleporter: PDF <-> .psdi conversion for narrow-bandwidth radio links."""
 
-__version__ = "2.2.2"
+__version__ = "2.4.0"

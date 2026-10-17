@@ -261,3 +261,116 @@ def rich_report(path: str) -> str:
     doc.save(path, deflate=True)
     doc.close()
     return path
+
+
+def bordered_sheet(path: str) -> str:
+    """Two small tables bordered the way spreadsheet exports draw them.
+
+    Left, as Excel does: every cell border is its own thin filled rectangle,
+    0.84 pt thick at fractional positions, with a gap at each crossing where
+    the perpendicular border passes; white and coloured cell fills under the
+    borders. Right, as LibreOffice does: every cell edge is its own stroke,
+    each inner edge drawn twice -- once per adjacent cell -- and neighbouring
+    pieces overlapping slightly at the corners.
+
+    Built for the drawing compaction: it must join what tiles, keep what is
+    painted twice, and survive whole-point coordinates without losing a
+    border.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=842, height=595)
+    page.insert_text(fitz.Point(40, 60), "Point de situation", fontname="hebo",
+                     fontsize=14)
+
+    # --- Excel style -------------------------------------------------------
+    x0, y0, cw, ch, t = 40.37, 100.29, 58.61, 18.43, 0.84
+    rows, cols = 6, 4
+    shape = page.new_shape()
+    for r in range(rows):
+        for c in range(cols):
+            cell = fitz.Rect(x0 + c * cw, y0 + r * ch, x0 + (c + 1) * cw, y0 + (r + 1) * ch)
+            shape.draw_rect(cell)
+            shape.finish(color=None, fill=(1, 0.75, 0) if r == 0 else (1, 1, 1), width=0)
+    shape.commit()
+    shape = page.new_shape()
+    for r in range(rows + 1):
+        y = y0 + r * ch
+        for c in range(cols):
+            # Each horizontal piece stops short of the vertical borders.
+            shape.draw_rect(fitz.Rect(x0 + c * cw + t, y, x0 + (c + 1) * cw, y + t))
+            shape.finish(color=None, fill=(0, 0, 0), width=0)
+    for c in range(cols + 1):
+        x = x0 + c * cw
+        for r in range(rows):
+            shape.draw_rect(fitz.Rect(x, y0 + r * ch, x + t, y0 + (r + 1) * ch + t))
+            shape.finish(color=None, fill=(0, 0, 0), width=0)
+    shape.commit()
+
+    # --- LibreOffice style ---------------------------------------------------
+    x0, y0, cw, ch, w = 400.6, 100.4, 61.3, 17.9, 0.36
+    shape = page.new_shape()
+    for r in range(rows):
+        for c in range(cols):
+            left, top = x0 + c * cw, y0 + r * ch
+            right, bottom = left + cw, top + ch
+            for a, b in (((left - 0.3, top), (right + 0.3, top)),
+                         ((left - 0.3, bottom), (right + 0.3, bottom)),
+                         ((left, top - 0.3), (left, bottom + 0.3)),
+                         ((right, top - 0.3), (right, bottom + 0.3))):
+                shape.draw_line(fitz.Point(*a), fitz.Point(*b))
+                shape.finish(color=(0, 0, 0), width=w)
+    shape.commit()
+
+    for r in range(rows):
+        for c in range(cols):
+            page.insert_text(fitz.Point(46 + c * 58.61, 113 + r * 18.43),
+                             f"Ligne {r} col {c}", fontname="helv", fontsize=6)
+            page.insert_text(fitz.Point(406 + c * 61.3, 113 + r * 17.9),
+                             f"Ligne {r} col {c}", fontname="helv", fontsize=6)
+
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
+
+
+def graphics_report(path: str) -> str:
+    """A flat-colour chart and a photograph on one structured page.
+
+    The chart is a few solid colours with hard edges -- what a palette PNG
+    stores best and JPEG worst. The photograph is noise, which nothing but
+    JPEG stores well.
+    """
+    from PIL import Image, ImageDraw
+    import io
+
+    rng = random.Random(11)
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text(fitz.Point(50, 60), "Bilan chiffré", fontname="hebo", fontsize=16)
+
+    chart = Image.new("RGB", (480, 300), (255, 255, 255))
+    draw = ImageDraw.Draw(chart)
+    for i, h in enumerate((120, 210, 90, 260, 170, 40)):
+        colour = ((68, 114, 196), (237, 125, 49), (165, 165, 165))[i % 3]
+        draw.rectangle([30 + i * 75, 280 - h, 85 + i * 75, 280], fill=colour)
+    draw.line([20, 280, 470, 280], fill=(0, 0, 0), width=2)
+    buf = io.BytesIO()
+    chart.save(buf, format="PNG")
+    page.insert_image(fitz.Rect(50, 80, 290, 230), stream=buf.getvalue())
+
+    photo = Image.new("RGB", (300, 200))
+    photo.putdata([(rng.randrange(256), rng.randrange(256), rng.randrange(256))
+                   for _ in range(300 * 200)])
+    buf = io.BytesIO()
+    photo.save(buf, format="JPEG", quality=90)
+    page.insert_image(fitz.Rect(320, 80, 545, 230), stream=buf.getvalue())
+
+    y = 270
+    for _ in range(12):
+        line = " ".join(rng.choice(WORDS) for _ in range(9)).capitalize()
+        page.insert_text(fitz.Point(50, y), line + ".", fontname="helv", fontsize=10)
+        y += 16
+
+    doc.save(path, deflate=True)
+    doc.close()
+    return path

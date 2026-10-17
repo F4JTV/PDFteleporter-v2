@@ -36,6 +36,7 @@ from __future__ import annotations
 import io
 import json
 import lzma
+import re
 import struct
 import zlib
 from dataclasses import dataclass, field
@@ -81,18 +82,98 @@ MAX_PAGES = 2000
 MAX_IMAGES = 5000
 
 
+# A raw LZMA2 stream does not record its dictionary size: the decoder brings
+# its own, and one built on the plain filter spec -- the original included --
+# gets liblzma's default of 8 MiB. Matches further back than that would fail
+# to decode there, so the encoder never looks further.
+_LZMA_MAX_DICT = 8 << 20
+_LZMA_MIN_DICT = 4 << 10
+
+
+def _dict_size_for(length: int) -> int:
+    """The smallest dictionary that still reaches the start of the data.
+
+    A dictionary larger than the input finds no extra match, so the output is
+    the same; but preset 9 asks for 64 MiB, and allocating it cost 38 ms per
+    call -- most of the compression time on a document of small images, each
+    payload compressed on its own.
+    """
+    size = _LZMA_MIN_DICT
+    while size < length and size < _LZMA_MAX_DICT:
+        size <<= 1
+    return size
+
+
 def _lzma_compress(data: bytes, preset: int) -> bytes:
     return lzma.compress(
         data,
         format=lzma.FORMAT_RAW,
-        filters=[{"id": lzma.FILTER_LZMA2, "preset": preset}],
+        filters=[{"id": lzma.FILTER_LZMA2, "preset": preset,
+                  "dict_size": _dict_size_for(len(data))}],
     )
 
 
 def _lzma_compress_text(data: bytes) -> bytes:
     """Compress manifest JSON with parameters tuned for text."""
-    return lzma.compress(data, format=lzma.FORMAT_RAW,
-                         filters=_LZMA_TEXT_FILTERS)
+    filters = [dict(_LZMA_TEXT_FILTERS[0], dict_size=_dict_size_for(len(data)))]
+    return lzma.compress(data, format=lzma.FORMAT_RAW, filters=filters)
+
+
+# A coordinate array of the manifest -- a box "b" or a rectangle "r" -- holding
+# numbers only. A quote inside a JSON string is always escaped, so '"b":[' can
+# only ever be a key.
+_COORDINATE_ARRAY = re.compile(r'"([br])":\[([^\[\]"]*)\]')
+_PLAIN_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+# Characters per coordinate: 1190.5, the width of an A3 landscape page, at a
+# tenth of a point; four digits at whole points.
+_DECIMAL_WIDTH = 6
+_INTEGER_WIDTH = 4
+
+
+def _manifest_json(manifest: dict) -> str:
+    """The manifest as JSON, its coordinates written at a fixed width.
+
+    JSON reads 84.100 as 84.1 and ignores the spaces in [  84, 102], so every
+    decoder parses the same numbers, and the manifest stays valid JSON. What
+    changes is LZMA's view of it: with every rectangle the same length, the
+    next one starts at the same distance from the last, and LZMA codes a
+    repeat at an unchanged distance far more cheaply than one at a new
+    distance. Rows of table borders differ from one another by a coordinate
+    or two; on the two situation sheets, writing them at a fixed width took
+    11 to 13 % off the compressed manifest at a tenth of a point, and 2 to
+    3 % at whole points. Decimal coordinates are padded with trailing zeros,
+    whole ones with leading spaces -- trailing zeros would add a decimal
+    point to every one of them.
+
+    The text is checked to parse back to the same manifest; if it ever did
+    not, the plain encoding is used.
+    """
+    text = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+    arrays = _COORDINATE_ARRAY.findall(text)
+    if not arrays:
+        return text
+    decimal = any("." in body for _, body in arrays)
+
+    def pad(token: str) -> str:
+        if not _PLAIN_NUMBER.fullmatch(token):
+            return token
+        if decimal:
+            if "." not in token:
+                token += ".0"
+            return token + "0" * (_DECIMAL_WIDTH - len(token))
+        return " " * (_INTEGER_WIDTH - len(token)) + token
+
+    aligned = _COORDINATE_ARRAY.sub(
+        lambda match: '"%s":[%s]' % (
+            match.group(1), ",".join(pad(token) for token in match.group(2).split(","))),
+        text,
+    )
+    try:
+        if json.loads(aligned) != json.loads(text):
+            return text
+    except ValueError:
+        return text
+    return aligned
 
 
 def _lzma_decompress(data: bytes, limit: int = MAX_PAYLOAD_SIZE) -> bytes:
@@ -235,8 +316,7 @@ def validate(data: bytes) -> dict:
 def write_struct(manifest: dict, images: dict[str, bytes],
                  lzma_preset: int = 6) -> bytes:
     """Serialise a version 1 archive."""
-    manifest_json = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
-    manifest_bytes = manifest_json.encode("utf-8")
+    manifest_bytes = _manifest_json(manifest).encode("utf-8")
     manifest_compressed = _lzma_compress_text(manifest_bytes)
 
     out = io.BytesIO()
