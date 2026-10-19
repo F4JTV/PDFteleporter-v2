@@ -28,12 +28,13 @@ class _BaseWorker(QThread):
 
 class CompressWorker(_BaseWorker):
     def __init__(self, pdf_path: str, quality: str, output_path: str,
-                 skip_images: bool):
+                 skip_images: bool, compact: bool = False):
         super().__init__()
         self._pdf_path = pdf_path
         self._quality = quality
         self._output_path = output_path
         self._skip_images = skip_images
+        self._compact = compact
 
     def run(self) -> None:
         try:
@@ -43,6 +44,7 @@ class CompressWorker(_BaseWorker):
                 output_path=self._output_path,
                 progress_cb=self._emit_progress,
                 skip_images=self._skip_images,
+                compact=self._compact,
             )
             self.finished_ok.emit(self._output_path, info)
         except Exception as exc:  # noqa: BLE001
@@ -61,11 +63,13 @@ class EstimateWorker(_BaseWorker):
     Nothing is written to disk: only the size and the transfer times are kept.
     """
 
-    def __init__(self, pdf_path: str, quality: str, skip_images: bool):
+    def __init__(self, pdf_path: str, quality: str, skip_images: bool,
+                 compact: bool = False):
         super().__init__()
         self._pdf_path = pdf_path
         self._quality = quality
         self._skip_images = skip_images
+        self._compact = compact
 
     def run(self) -> None:
         try:
@@ -73,6 +77,7 @@ class EstimateWorker(_BaseWorker):
                 self._pdf_path,
                 quality=self._quality,
                 skip_images=self._skip_images,
+                compact=self._compact,
             )
             self.finished_ok.emit(self._pdf_path, info)
         except Exception as exc:  # noqa: BLE001

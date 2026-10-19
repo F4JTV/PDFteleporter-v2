@@ -103,10 +103,6 @@ class TestCliAcceptsMenuCommands(unittest.TestCase):
             self.assertTrue(path.startswith("Software\\Classes"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FakeRegistry:
     """An in-memory stand-in for winreg, enough to exercise install().
 
@@ -184,7 +180,9 @@ class _FakeKey:
         return False
 
 
-class TestRegistryShape(unittest.TestCase):
+class _FakeWinreg:
+    """Mixin: run each test against a fresh FakeRegistry posing as winreg."""
+
     def setUp(self):
         import sys
 
@@ -203,6 +201,8 @@ class TestRegistryShape(unittest.TestCase):
         else:
             sys.modules["winreg"] = self._saved
 
+
+class TestRegistryShape(_FakeWinreg, unittest.TestCase):
     def _install(self):
         shell_windows.install(shell_windows.SCOPE_USER)
 
@@ -260,25 +260,7 @@ class TestRegistryShape(unittest.TestCase):
         self.assertFalse(leftovers, f"clés restantes : {leftovers}")
 
 
-class TestImageVerbs(unittest.TestCase):
-    def setUp(self):
-        import sys
-
-        self.fake = FakeRegistry()
-        self._saved = sys.modules.get("winreg")
-        sys.modules["winreg"] = self.fake
-        self._supported = shell_windows.is_supported
-        shell_windows.is_supported = lambda: True
-
-    def tearDown(self):
-        import sys
-
-        shell_windows.is_supported = self._supported
-        if self._saved is None:
-            sys.modules.pop("winreg", None)
-        else:
-            sys.modules["winreg"] = self._saved
-
+class TestImageVerbs(_FakeWinreg, unittest.TestCase):
     def test_every_image_type_gets_the_same_cascade(self):
         shell_windows.install(shell_windows.SCOPE_USER)
         for extension in shell_windows.IMAGE_EXTENSIONS_FOR_MENU:
@@ -302,3 +284,148 @@ class TestImageVerbs(unittest.TestCase):
         shell_windows.uninstall()
         leftovers = [p for (_r, p) in self.fake.keys if "PDFteleporterCompress" in p]
         self.assertFalse(leftovers, leftovers)
+
+
+class TestTwoArchiveFormats(_FakeWinreg, unittest.TestCase):
+    """Each compressible type offers both formats, and the menu says which."""
+
+    def _install(self):
+        shell_windows.install(shell_windows.SCOPE_USER)
+
+    def _cascades(self):
+        verbs = [(shell_windows.PDF_VERB_KEY, False),
+                 (shell_windows.PDF_COMPACT_VERB_KEY, True)]
+        for extension in shell_windows.IMAGE_EXTENSIONS_FOR_MENU:
+            verbs.append((shell_windows._image_verb_key(extension), False))
+            verbs.append((shell_windows._image_compact_verb_key(extension), True))
+        return verbs
+
+    def _entry_commands(self, verb_key):
+        entries = sorted(self.fake.subkeys_of("HKCU", verb_key + "\\shell"))
+        return [self.fake.keys[("HKCU", f"{verb_key}\\shell\\{entry}\\command")][None]
+                for entry in entries]
+
+    def test_every_compressible_type_offers_both_cascades(self):
+        self._install()
+        for verb_key, compact in self._cascades():
+            with self.subTest(verb=verb_key):
+                key = self.fake.keys[("HKCU", verb_key)]
+                expected = (shell_windows.PDF_COMPACT_VERB_LABEL if compact
+                            else shell_windows.PDF_VERB_LABEL)
+                self.assertEqual(key["MUIVerb"], expected)
+                self.assertEqual(key["SubCommands"], "")
+                self.assertIsNone(key.get(None))
+                self.assertNotIn("command", self.fake.subkeys_of("HKCU", verb_key))
+                commands = self._entry_commands(verb_key)
+                self.assertEqual(len(commands), len(shell_windows.QUALITY_MENU))
+
+    def test_only_the_compact_cascade_asks_for_compact(self):
+        # The flag is the whole difference between the two menus. Missing on
+        # the compact side, the operator gets a .psdi while believing it is
+        # compact; present on the other, a station running F1GBD's
+        # PDFteleporter receives a file it cannot open.
+        self._install()
+        for verb_key, compact in self._cascades():
+            for (quality, _label), command in zip(shell_windows.QUALITY_MENU,
+                                                  self._entry_commands(verb_key)):
+                with self.subTest(verb=verb_key, quality=quality):
+                    self.assertIn(f"--quality {quality}", command)
+                    self.assertEqual("--compact" in command, compact)
+
+    def test_labels_name_the_format(self):
+        self.assertIn(".psdi", shell_windows.PDF_VERB_LABEL)
+        self.assertIn("F1GBD", shell_windows.PDF_VERB_LABEL)
+        self.assertIn(".psdz", shell_windows.PDF_COMPACT_VERB_LABEL)
+        self.assertNotIn(".psdz", shell_windows.PDF_VERB_LABEL)
+        self.assertNotIn(".psdi", shell_windows.PDF_COMPACT_VERB_LABEL)
+
+    def test_the_compatible_entry_comes_first(self):
+        # Explorer lists static verbs in key-name order.
+        compatible = shell_windows.PDF_VERB_KEY.rsplit("\\", 1)[1]
+        compact = shell_windows.PDF_COMPACT_VERB_KEY.rsplit("\\", 1)[1]
+        self.assertLess(compatible, compact)
+
+    def test_psdz_files_have_a_type_of_their_own(self):
+        self._install()
+        keys = self.fake.keys
+        self.assertEqual(keys[("HKCU", shell_windows.PSDZ_EXT_KEY)][None],
+                         shell_windows.COMPACT_PROGID)
+        self.assertEqual(keys[("HKCU", shell_windows.PSDZ_PROGID_KEY)][None],
+                         shell_windows.PSDZ_TYPE_NAME)
+        self.assertIn(("HKCU", shell_windows.PSDZ_PROGID_KEY + "\\DefaultIcon"), keys)
+        # The .psdi association is left exactly as before.
+        self.assertEqual(keys[("HKCU", shell_windows.PSDI_EXT_KEY)][None],
+                         shell_windows.PROGID)
+        self.assertEqual(shell_windows.PROGID, "PDFteleporter.psdi")
+        for verb_key in (shell_windows.PSDI_VERB_KEY, shell_windows.PSDZ_VERB_KEY):
+            with self.subTest(verb=verb_key):
+                command = keys[("HKCU", verb_key + "\\command")][None]
+                self.assertIn('--rebuild "%1"', command)
+                # The archive says which format it is; nothing to pass.
+                self.assertNotIn("--compact", command)
+
+    def test_uninstall_leaves_neither_format_behind(self):
+        self._install()
+        shell_windows.uninstall()
+        leftovers = [path for (_root, path) in self.fake.keys
+                     if "PDFteleporter" in path
+                     or path.endswith((".psdi", ".psdz"))]
+        self.assertFalse(leftovers, leftovers)
+
+    def test_installed_scopes_sees_the_menu(self):
+        # Until 2.5.0 this looked for a command under the PDF verb, which is a
+        # cascade and has none, so an installed menu always read as absent.
+        self.assertEqual(shell_windows.installed_scopes(), [])
+        shell_windows.install(shell_windows.SCOPE_USER)
+        self.assertEqual(shell_windows.installed_scopes(), [shell_windows.SCOPE_USER])
+        self.assertTrue(shell_windows.is_installed())
+        shell_windows.install(shell_windows.SCOPE_MACHINE)
+        self.assertEqual(shell_windows.installed_scopes(),
+                         [shell_windows.SCOPE_USER, shell_windows.SCOPE_MACHINE])
+        shell_windows.uninstall()
+        self.assertEqual(shell_windows.installed_scopes(), [])
+        self.assertFalse(shell_windows.is_installed())
+
+    def test_every_written_command_reaches_the_cli_intact(self):
+        # Feed each command line the menu registers to the real entry point,
+        # with the actions replaced by spies, and check that the quality and
+        # the format arrive. A command the shorthand misreads would fail on
+        # the operator's machine with no console to show why.
+        import shlex
+        from unittest import mock
+
+        from psditool import cli
+
+        self._install()
+        calls = []
+        compress = mock.Mock(side_effect=lambda *a: calls.append(("compress",) + a) or 0)
+        rebuild = mock.Mock(side_effect=lambda *a: calls.append(("rebuild",) + a) or 0)
+        commands = []
+        for verb_key, compact in self._cascades():
+            for (quality, _label), command in zip(shell_windows.QUALITY_MENU,
+                                                  self._entry_commands(verb_key)):
+                commands.append((command, ("compress", quality, compact)))
+        for verb_key in (shell_windows.PSDI_VERB_KEY, shell_windows.PSDZ_VERB_KEY):
+            commands.append((self.fake.keys[("HKCU", verb_key + "\\command")][None],
+                             ("rebuild",)))
+
+        with mock.patch.object(cli, "cmd_compress", compress), \
+                mock.patch.object(cli, "cmd_rebuild", rebuild):
+            for command, expected in commands:
+                with self.subTest(command=command):
+                    parts = [part.strip('"') for part in shlex.split(command, posix=False)]
+                    argv = parts[parts.index("--" + expected[0]):]
+                    argv[1] = "C:\\Mes documents\\rapport.pdf"
+                    calls.clear()
+                    self.assertEqual(cli.main(argv), 0)
+                    self.assertEqual(len(calls), 1)
+                    action, target, *rest = calls[0]
+                    self.assertEqual(action, expected[0])
+                    self.assertEqual(target, "C:\\Mes documents\\rapport.pdf")
+                    if action == "compress":
+                        quality, _output, _skip, _quiet, compact = rest
+                        self.assertEqual((quality, compact), expected[1:])
+
+
+if __name__ == "__main__":
+    unittest.main()

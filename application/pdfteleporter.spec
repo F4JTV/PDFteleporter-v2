@@ -60,6 +60,28 @@ if _missing:
         ])
     )
 
+# Compact archives (.psdz) carry AVIF and WebP images, which Pillow encodes
+# and decodes through compiled plugins of its own. AVIF is in Pillow's wheels
+# from 11.3 on, except the Windows ARM64 ones -- hence an x64 build, which
+# Arm64 machines run under emulation. A Pillow without these plugins would
+# write compact archives without their main saving and could not show the
+# photographs of a compact archive it receives, so the build refuses to go
+# ahead without both.
+from PIL import features as _pil_features
+
+_missing_codecs = [_c for _c in ("avif", "webp") if not _pil_features.check(_c)]
+if _missing_codecs:
+    raise SystemExit(
+        "\nBuild aborted: this Pillow cannot read and write "
+        + " and ".join(_c.upper() for _c in _missing_codecs)
+        + ", which compact archives need.\nInstall Pillow 11.3 or later, "
+        "from an x64 Python (the Windows ARM64 wheels have no AVIF):\n"
+        f'    "{sys.executable}" -m pip install --upgrade "Pillow>=11.3"\n'
+    )
+# Their plugins are imported by name at run time, which PyInstaller's module
+# graph cannot see.
+_pillow_hidden = ["PIL.AvifImagePlugin", "PIL.WebPImagePlugin", "PIL._avif", "PIL._webp"]
+
 # PyMuPDF ships no PyInstaller hook of its own, and PyInstaller bundles none
 # for it, so nothing collects its compiled extensions automatically. Name them
 # explicitly.
@@ -146,7 +168,7 @@ a = Analysis(
     pathex=[],
     binaries=_pymupdf_binaries,
     datas=[('assets/pdfteleporter.ico', 'assets')] + _qt_translations,
-    hiddenimports=_pymupdf_hidden,
+    hiddenimports=_pymupdf_hidden + _pillow_hidden,
     hookspath=[],
     runtime_hooks=[],
     excludes=EXCLUDES,

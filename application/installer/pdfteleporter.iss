@@ -14,7 +14,7 @@
 ; PyInstaller. build.cmd in the project root does both steps in order.
 
 #define AppName        "PDF Teleporter"
-#define AppVersion     "2.4.1"
+#define AppVersion     "2.5.0"
 #define AppPublisher   "The PDF Teleporter contributors"
 #define AppURL         "https://github.com/F4JTV/PDFteleporter-v2"
 #define AppExeName     "PDFteleporter.exe"
@@ -81,8 +81,8 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "fr"; MessagesFile: "compiler:Languages\French.isl"
 
 [CustomMessages]
-en.ShellTask=Add "compress to .psdi" and "rebuild PDF" to the Explorer context menu
-fr.ShellTask=Ajouter « compresser en .psdi » et « recomposer le PDF » au menu contextuel de l'Explorateur
+en.ShellTask=Add "compress to .psdi / .psdz" and "rebuild PDF" to the Explorer context menu
+fr.ShellTask=Ajouter « compresser en .psdi / .psdz » et « recomposer le PDF » au menu contextuel de l'Explorateur
 en.DesktopTask=Create a desktop shortcut
 fr.DesktopTask=Créer un raccourci sur le Bureau
 en.Win11Note=On Windows 11 the new entries appear under "Show more options".

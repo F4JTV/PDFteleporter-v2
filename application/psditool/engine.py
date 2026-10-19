@@ -25,6 +25,8 @@ path for it produces a page rotated by 90 degrees on a black background.
 
 from __future__ import annotations
 
+import array
+import functools
 import io
 import logging
 import math
@@ -51,7 +53,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
             "PyMuPDF, so it was never bundled. Rebuild it."
         ) from _exc
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageMath, features as _pil_features
 
 from . import format as psdi
 from .presets import QUALITY_MEDIUM, QUALITY_PRESETS, estimate_times
@@ -145,6 +147,9 @@ _COST_REBUILD_PAGE = 20.0
 _COST_REBUILD_SAVE_PER_LINE = 0.05
 _COST_REBUILD_SAVE_PER_PAGE = 0.5  # page-image mode: one image per page
 _COST_COMPRESS_IMAGE = 1.0      # extract, mask, downscale, JPEG encode
+# Compact archives add the AVIF quality search: about 0.2 s per image of the
+# WHO bulletin, eighteen times a page's share of the rest.
+_COST_COMPRESS_IMAGE_COMPACT = 18.0
 _COST_COMPRESS_PAGE = 5.0       # artwork regions, rawdict extraction
 _COST_COMPRESS_WRITE_PER_PAGE = 8.0  # LZMA at preset 9 over the manifest
 _COST_RENDER_PAGE = 5.0         # page-image mode: pixmap and JPEG encode
@@ -610,8 +615,23 @@ def _smallest_palettes(base: Image.Image, n_colours: int, target: float) -> list
     return found
 
 
-def _encode_payload(img: Image.Image, quality: int, lzma_preset: int) -> bytes:
+def _encode_payload(img: Image.Image, quality: int, lzma_preset: int,
+                    compact: bool = False) -> bytes:
     """Encode one image of a structured archive in its smallest faithful form.
+
+    The classic JPEG-or-PNG choice is what a .psdi carries; a compact archive
+    then offers AVIF and WebP the same image at equal fidelity.
+    """
+    if img.mode == "RGB" and _is_effectively_monochrome(img):
+        img = img.convert("L")
+    payload = _smallest_classic_payload(img, quality, lzma_preset)
+    if compact:
+        payload = _compact_payload(img, payload, lzma_preset)
+    return payload
+
+
+def _smallest_classic_payload(img: Image.Image, quality: int, lzma_preset: int) -> bytes:
+    """The smallest faithful JPEG or PNG, as every .psdi decoder reads them.
 
     The JPEG is written both progressive and baseline: the two hold the same
     coefficients and decode to the same pixels, and on small images the extra
@@ -625,9 +645,6 @@ def _encode_payload(img: Image.Image, quality: int, lzma_preset: int) -> bytes:
     an uncompressed PNG the usual winner: LZMA codes raw palette indices
     better than deflate.
     """
-    if img.mode == "RGB" and _is_effectively_monochrome(img):
-        img = img.convert("L")
-
     def stored(payload: bytes) -> int:
         return len(psdi.pack_payload(payload, lzma_preset)[1])
 
@@ -663,6 +680,223 @@ def _encode_payload(img: Image.Image, quality: int, lzma_preset: int) -> bytes:
             if size < best[0]:
                 best = (size, payload)
     return best[1]
+
+
+# --- compact archives (.psdz): AVIF photographs, WebP graphics -----------------
+# MuPDF reads neither format, so neither can travel in a .psdi: a station
+# running the original would lose the picture. In a .psdz the rebuild decodes
+# them itself (see _place_image).
+#
+# A photograph that the classic choice keeps as JPEG is offered as AVIF at the
+# lowest quality whose PSNR *and* SSIM against the very pixels the JPEG was
+# made from are at least the JPEG's. Matching PSNR alone was measured to let
+# AVIF smooth fine texture below the JPEG's SSIM on four images, two of them
+# photographs of the WHO bulletin at "high"; requiring both keeps the promise
+# "no less faithful by either measure". On the bulletin's photographs this
+# takes 39 to 45 % off the bytes, depending on the preset.
+#
+# A graphic kept as PNG is re-coded as lossless WebP: the same pixels, so the
+# same fidelity, usually smaller.
+#
+# Tiny images also try lossy WebP, whose container is lighter than AVIF's:
+# on an icon of 40x50 pixels AVIF's own headers outweigh the JPEG.
+
+# libaom's speed setting: 6 is within 2 % of the slowest setting's size on the
+# bulletin and fourteen times faster. Whole pages (page-image archives) use 7,
+# about twice as fast again for 3 to 6 % more bytes: a page is a million
+# pixels or more, and the quality search encodes it seven times.
+_AVIF_SPEED = 6
+_AVIF_PAGE_SPEED = 7
+_AVIF_PAGE_PIXELS = 1_000_000
+_WEBP_LOSSY_MAX_PIXELS = 20_000
+# SSIM over non-overlapping 7x7 windows: the window of scikit-image's default
+# SSIM, without its one-pixel stride. Windows of 7 straddle JPEG's 8x8 blocks,
+# so its blocking is inside the measure rather than between windows.
+_SSIM_WINDOW = 7
+_SSIM_C1 = (0.01 * 255) ** 2
+_SSIM_C2 = (0.03 * 255) ** 2
+# A decoded AVIF or WebP larger than this is refused rather than allocated. A
+# page at 600 dpi is under 35 megapixels; anything this encoder writes is far
+# smaller.
+_MAX_DECODED_PIXELS = 50_000_000
+
+
+def _ssim(reference: Image.Image, candidate: Image.Image) -> float:
+    """Mean SSIM of `candidate` against `reference`, all bands averaged.
+
+    Computed with Pillow's 32-bit float images -- box means by reduce(), the
+    rest by ImageMath -- so, like _psnr, it needs no numerical library.
+    """
+    candidate = candidate.convert(reference.mode)
+    if min(reference.size) < _SSIM_WINDOW:
+        return 1.0 if ImageChops.difference(reference, candidate).getbbox() is None else 0.0
+    window = _SSIM_WINDOW
+    scores = []
+    for x_band, y_band in zip(reference.split(), candidate.split()):
+        x = x_band.convert("F")
+        y = y_band.convert("F")
+        mean_x = x.reduce(window)
+        mean_y = y.reduce(window)
+        xx = ImageMath.lambda_eval(lambda a: a["x"] * a["x"], x=x).reduce(window)
+        yy = ImageMath.lambda_eval(lambda a: a["y"] * a["y"], y=y).reduce(window)
+        xy = ImageMath.lambda_eval(lambda a: a["x"] * a["y"], x=x, y=y).reduce(window)
+        ssim_map = ImageMath.lambda_eval(
+            lambda a: ((2 * a["mx"] * a["my"] + _SSIM_C1)
+                       * (2 * (a["xy"] - a["mx"] * a["my"]) + _SSIM_C2))
+            / ((a["mx"] * a["mx"] + a["my"] * a["my"] + _SSIM_C1)
+               * (a["xx"] - a["mx"] * a["mx"] + a["yy"] - a["my"] * a["my"] + _SSIM_C2)),
+            mx=mean_x, my=mean_y, xx=xx, yy=yy, xy=xy,
+        )
+        values = array.array("f", ssim_map.tobytes())
+        scores.append(sum(values) / len(values))
+    return sum(scores) / len(scores)
+
+
+def _matching_quality(img: Image.Image, encode, target_psnr: float,
+                      target_ssim: float) -> bytes | None:
+    """The lowest-quality encoding of `img` at least as faithful as the targets.
+
+    Fidelity rises with the quality setting, so the setting is bisected: seven
+    encodings instead of a hundred. Only an encoding that passes both tests
+    is ever returned.
+    """
+    low, high = 1, 100
+    found = None
+    while low <= high:
+        quality = (low + high) // 2
+        payload = encode(quality)
+        decoded = Image.open(io.BytesIO(payload))
+        decoded.load()
+        if _psnr(img, decoded) >= target_psnr and _ssim(img, decoded) >= target_ssim:
+            found = payload
+            high = quality - 1
+        else:
+            low = quality + 1
+    return found
+
+
+@functools.lru_cache(maxsize=None)
+def _codec_available(name: str) -> bool:
+    """Whether this Pillow can read and write `name` ("avif" or "webp").
+
+    The frozen build refuses to be made without both; running from source
+    with an older Pillow, a compact archive is still written, without the
+    codec that is missing.
+    """
+    try:
+        return bool(_pil_features.check(name))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _compact_payload(img: Image.Image, payload: bytes, lzma_preset: int) -> bytes:
+    """Offer a classic payload's image as AVIF or WebP; keep the smallest.
+
+    `img` is the very image `payload` was encoded from, so the targets are
+    the classic payload's own fidelity to it.
+    """
+    def stored(data: bytes) -> int:
+        return len(psdi.pack_payload(data, lzma_preset)[1])
+
+    best = (stored(payload), payload)
+    kind = psdi.payload_kind(payload)
+    if kind == "jpeg":
+        decoded = Image.open(io.BytesIO(payload))
+        decoded.load()
+        target_psnr = _psnr(img, decoded)
+        target_ssim = _ssim(img, decoded)
+        pixels = img.width * img.height
+        speed = _AVIF_SPEED if pixels <= _AVIF_PAGE_PIXELS else _AVIF_PAGE_SPEED
+        encoders = []
+        if _codec_available("avif"):
+            encoders.append(lambda q: _image_bytes(img, format="AVIF", quality=q,
+                                                   speed=speed))
+        if pixels <= _WEBP_LOSSY_MAX_PIXELS and _codec_available("webp"):
+            encoders.append(lambda q: _image_bytes(img, format="WEBP", quality=q,
+                                                   method=6))
+        for encode in encoders:
+            found = _matching_quality(img, encode, target_psnr, target_ssim)
+            if found is not None and stored(found) < best[0]:
+                best = (stored(found), found)
+    elif kind == "png" and _codec_available("webp"):
+        # The PNG's own pixels, palette resolved: lossless WebP keeps them
+        # exactly, so the fidelity is the PNG's whatever the format.
+        source = Image.open(io.BytesIO(payload))
+        source.load()
+        if source.mode not in ("L", "RGB"):
+            source = source.convert("RGB")
+        webp = _image_bytes(source, format="WEBP", lossless=True, quality=100, method=6)
+        if stored(webp) < best[0]:
+            best = (stored(webp), webp)
+    return best[1]
+
+
+def _encode_page(img: Image.Image, params: dict) -> bytes:
+    """One page of a page-image archive: JPEG, or AVIF in a compact archive."""
+    jpeg = _encode_jpeg(img, params["jpeg_quality"])
+    if not params.get("compact"):
+        return jpeg
+    # _encode_jpeg drops the colour planes of a page without colour; the
+    # reference must be the same grey image the JPEG was made from.
+    reference = img.convert("L") if Image.open(io.BytesIO(jpeg)).mode == "L" else img
+    return _compact_payload(reference, jpeg, params["lzma_preset"])
+
+
+def _require_codecs(payloads) -> None:
+    """Refuse up front an archive whose images this installation cannot decode.
+
+    A damaged payload costs only its own image, skipped with a warning. A
+    missing codec is different: it is the installation's fault, it would cost
+    every photograph of the document, and the operator would get a PDF without
+    them and a log line. Saying so before rebuilding anything points at the
+    fix, which is a newer Pillow.
+    """
+    for payload in payloads:
+        kind = psdi.payload_kind(payload)
+        if kind in ("avif", "webp") and not _codec_available(kind):
+            raise psdi.PsdiError(
+                f"This installation cannot decode {kind.upper()} images; "
+                "compact archives need Pillow 11.3 or later with AVIF and WebP "
+                "support (the Windows ARM64 wheels have no AVIF)"
+            )
+
+
+def _pixmap_from(payload: bytes):
+    """Decode an AVIF or WebP payload into a MuPDF pixmap, refusing bombs."""
+    kind = psdi.payload_kind(payload)
+    _require_codecs([payload])
+    try:
+        img = Image.open(io.BytesIO(payload))
+    except Exception as exc:  # noqa: BLE001 - any parser failure is damage
+        raise psdi.PsdiError(f"Unreadable {kind.upper()} image: {exc}") from exc
+    if img.width * img.height > _MAX_DECODED_PIXELS:
+        raise psdi.PsdiError(
+            f"Image of {img.width}x{img.height} pixels, above the "
+            f"{_MAX_DECODED_PIXELS} pixel ceiling"
+        )
+    try:
+        img.load()
+    except Exception as exc:  # noqa: BLE001 - a truncated stream is damage
+        raise psdi.PsdiError(f"Unreadable {kind.upper()} image: {exc}") from exc
+    if img.mode not in ("L", "RGB"):
+        img = img.convert("RGB")
+    colourspace = fitz.csGRAY if img.mode == "L" else fitz.csRGB
+    return fitz.Pixmap(colourspace, img.width, img.height, img.tobytes(), False)
+
+
+def _place_image(page, rect, payload: bytes) -> None:
+    """Draw one image payload into `rect`.
+
+    JPEG and PNG go to MuPDF as they are, exactly as before compact archives
+    existed. AVIF and WebP, which MuPDF cannot read, are decoded here and
+    handed over as pixels: the rebuilt PDF then stores them losslessly, so
+    the page shows exactly the pixels whose fidelity the encoder measured.
+    The rebuilt file never goes on the air; its size does not matter.
+    """
+    if psdi.payload_kind(payload) in ("avif", "webp"):
+        page.insert_image(rect, pixmap=_pixmap_from(payload))
+    else:
+        page.insert_image(rect, stream=payload)
 
 
 def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict,
@@ -723,7 +957,8 @@ def _optimize_image(img_bytes: bytes, width: int, height: int, params: dict,
             if target != img.size:
                 img = img.resize(target, Image.LANCZOS)
 
-    return (_encode_payload(img, params["jpeg_quality"], params["lzma_preset"]),
+    return (_encode_payload(img, params["jpeg_quality"], params["lzma_preset"],
+                            params.get("compact", False)),
             width, height)
 
 
@@ -2149,7 +2384,8 @@ def _render_region(page, region, params: dict) -> bytes | None:
         if pix.width < 2 or pix.height < 2:
             return None
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        return _encode_payload(img, params["jpeg_quality"], params["lzma_preset"])
+        return _encode_payload(img, params["jpeg_quality"], params["lzma_preset"],
+                               params.get("compact", False))
     except Exception:  # noqa: BLE001
         log.debug("Could not rasterise region %s", region, exc_info=True)
         return None
@@ -2202,9 +2438,11 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
                     if prev is None or w_pt * h_pt > prev[0] * prev[1]:
                         largest_pt[xref] = (w_pt, h_pt)
 
+        image_cost = (_COST_COMPRESS_IMAGE_COMPACT if params.get("compact")
+                      else _COST_COMPRESS_IMAGE)
         progress = _Progress(
             progress_cb,
-            len(largest_pt) * _COST_COMPRESS_IMAGE
+            len(largest_pt) * image_cost
             + page_count * (_COST_COMPRESS_PAGE + _COST_COMPRESS_WRITE_PER_PAGE),
         )
 
@@ -2222,7 +2460,7 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
                         "h": orig_h,
                         "s": len(payload),
                     }
-                progress.advance(_COST_COMPRESS_IMAGE,
+                progress.advance(image_cost,
                                  f"Extraction des images ({n}/{image_total})…")
 
         progress.phase(f"Analyse des pages (0/{page_count})…")
@@ -2280,11 +2518,18 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
                              f"Analyse des pages ({page_idx + 1}/{page_count})…")
 
         progress.phase("Compression LZMA de l'archive…")
-        data = psdi.write_struct(manifest, images_data, params["lzma_preset"])
+        writer = psdi.write_compact_struct if params.get("compact") else psdi.write_struct
+        data = writer(manifest, images_data, params["lzma_preset"])
         progress.finish("Archive construite")
         return data
     finally:
         doc.close()
+
+
+def _image_version(params: dict) -> int:
+    """The container version of a page-image archive for these settings."""
+    return (psdi.ARCHIVE_VERSION_COMPACT_IMAGE if params.get("compact")
+            else psdi.ARCHIVE_VERSION_IMAGE)
 
 
 def _compress_image(pdf_path: str, params: dict, progress_cb: ProgressFn) -> bytes:
@@ -2304,12 +2549,12 @@ def _compress_image(pdf_path: str, params: dict, progress_cb: ProgressFn) -> byt
             pix = page.get_pixmap(matrix=matrix)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             pages.append((page.rect.width, page.rect.height,
-                          _encode_jpeg(img, params["jpeg_quality"])))
+                          _encode_page(img, params)))
             progress.advance(_COST_RENDER_PAGE,
                              f"Rendu des pages à {dpi} ppp ({i + 1}/{total})…")
 
         progress.phase("Écriture de l'archive…")
-        data = psdi.write_image(pages, params["lzma_preset"])
+        data = psdi.write_image(pages, params["lzma_preset"], _image_version(params))
         progress.finish("Archive construite")
         return data
     finally:
@@ -2410,12 +2655,12 @@ def _compress_image_file(path: str, params: dict, progress_cb: ProgressFn) -> by
         if frame.size != target:
             frame = frame.resize(target, Image.LANCZOS)
         pages.append((width_pt, height_pt,
-                      _encode_jpeg(frame, params["jpeg_quality"])))
+                      _encode_page(frame, params)))
         progress.advance(_COST_RENDER_PAGE,
                          f"Préparation des images à {dpi} ppp ({i + 1}/{total})…")
 
     progress.phase("Écriture de l'archive…")
-    data = psdi.write_image(pages, params["lzma_preset"])
+    data = psdi.write_image(pages, params["lzma_preset"], _image_version(params))
     progress.finish("Archive construite")
     return data
 
@@ -2423,8 +2668,13 @@ def _compress_image_file(path: str, params: dict, progress_cb: ProgressFn) -> by
 def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
                    mode: str = MODE_STRUCT, output_path: str | None = None,
                    progress_cb: ProgressFn = None,
-                   skip_images: bool = False) -> tuple[bytes, dict]:
-    """Compress a PDF into a .psdi archive.
+                   skip_images: bool = False,
+                   compact: bool = False) -> tuple[bytes, dict]:
+    """Compress a PDF into a .psdi archive, or a compact .psdz one.
+
+    A .psdi is what every implementation of the format reads, the original
+    included, and is byte for byte what versions before 2.5.0 wrote. A .psdz
+    (`compact`) is smaller and read only by this implementation from 2.5.0.
 
     Returns the archive bytes and a report covering size, ratio and the
     estimated on-air time per radio mode.
@@ -2440,6 +2690,8 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
         raise ValueError(f"Invalid mode: {mode}. Choose struct or image")
 
     params = QUALITY_PRESETS[quality]
+    if compact:
+        params = dict(params, compact=True)
     original_size = os.path.getsize(pdf_path)
     started = time.time()
 
@@ -2489,19 +2741,24 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
         "mode": mode,
         "auto_mode_switch": auto_switch_reason,
         "estimates": estimate_times(len(archive_bytes)),
+        "compact": compact,
+        "extension": psdi.COMPACT_EXTENSION if compact else psdi.EXTENSION,
     }
     log.info(
-        "PDF -> archive: %s -> %s bytes (%s%%) in %.1fs [%s/%s]",
+        "PDF -> archive: %s -> %s bytes (%s%%) in %.1fs [%s/%s%s]",
         f"{original_size:,}", f"{len(archive_bytes):,}",
-        info["ratio_percent"], elapsed, quality, mode,
+        info["ratio_percent"], elapsed, quality, mode, "/compact" if compact else "",
     )
     return archive_bytes, info
 
 
-def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes, dict]:
-    parsed = psdi.read_struct(archive_data)
+def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
+                    compact: bool = False) -> tuple[bytes, dict]:
+    parsed = (psdi.read_compact_struct if compact else psdi.read_struct)(archive_data)
     manifest = parsed.manifest
     images = parsed.images
+    if compact:
+        _require_codecs(images.values())
 
     # Text lines are the unit of work: each one is laid out through a Story
     # and a temporary document, which is where nearly all the time goes. A
@@ -2559,7 +2816,7 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes
                     # invisible placement used to abort the whole rebuild.
                     continue
                 try:
-                    page.insert_image(rect, stream=payload)
+                    _place_image(page, rect, payload)
                 except Exception:  # noqa: BLE001
                     # An undecodable payload costs that image, not the page.
                     log.warning("Image %s could not be placed on page %d",
@@ -2845,7 +3102,7 @@ def _rebuild_image(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes,
         progress.phase(f"Recomposition des pages (0/{total})…")
         for i, (width, height, jpeg) in enumerate(parsed.pages):
             page = doc.new_page(width=width, height=height)
-            page.insert_image(page.rect, stream=jpeg)
+            _place_image(page, page.rect, jpeg)
             progress.advance(_COST_REBUILD_PAGE,
                              f"Recomposition des pages ({i + 1}/{total})…")
 
@@ -2861,7 +3118,7 @@ def _rebuild_image(archive_data: bytes, progress_cb: ProgressFn) -> tuple[bytes,
 
 def archive_to_pdf(archive_data: bytes, output_path: str | None = None,
                    progress_cb: ProgressFn = None) -> tuple[bytes, dict]:
-    """Rebuild a PDF from a received .psdi archive.
+    """Rebuild a PDF from a received .psdi or .psdz archive.
 
     Every failure mode raises PsdiError, including a malformed container or a
     manifest that does not describe a coherent document, so the caller never
@@ -2871,12 +3128,16 @@ def archive_to_pdf(archive_data: bytes, output_path: str | None = None,
     _progress(progress_cb, 0, PROGRESS_SCALE,
               f"Lecture de l'archive ({len(archive_data) // 1024} ko)…")
 
-    if version == psdi.ARCHIVE_VERSION_STRUCT:
-        pdf_bytes, info = _rebuild_struct(archive_data, progress_cb)
-    elif version == psdi.ARCHIVE_VERSION_IMAGE:
+    if version in (psdi.ARCHIVE_VERSION_STRUCT, psdi.ARCHIVE_VERSION_COMPACT_STRUCT):
+        pdf_bytes, info = _rebuild_struct(
+            archive_data, progress_cb,
+            compact=version == psdi.ARCHIVE_VERSION_COMPACT_STRUCT)
+    elif version in (psdi.ARCHIVE_VERSION_IMAGE, psdi.ARCHIVE_VERSION_COMPACT_IMAGE):
         pdf_bytes, info = _rebuild_image(archive_data, progress_cb)
     else:
         raise psdi.PsdiError(f"Unsupported archive version: {version}")
+    info["version"] = version
+    info["compact"] = version in psdi.COMPACT_VERSIONS
 
     _progress(progress_cb, PROGRESS_SCALE, PROGRESS_SCALE, "Recomposition terminée")
 

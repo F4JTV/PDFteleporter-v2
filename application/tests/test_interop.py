@@ -22,6 +22,12 @@ plain `struct` and `json`, with `.get(key, default)` for every optional field
 -- and asserts it recovers the document. This is what proves the compression
 work stayed compatible: keys are omitted from the manifest when they equal
 their default, and that is only safe if the reader supplies those defaults.
+
+Compact archives (.psdz) are a contract too, with the stations running this
+implementation: their golden vectors pin what the encoder writes, and a
+stored sample pins what the decoder must keep reading. Only documents without
+images are pinned, because AVIF and WebP bytes depend on the codec library
+version Pillow ships, which this project does not control.
 """
 
 from __future__ import annotations
@@ -62,7 +68,19 @@ CASES = [
     ("sheet", "bordered_sheet", {"quality": "medium"}),
     ("graphics", "graphics_report", {"quality": "ultra_low"}),
     ("graphics", "graphics_report", {"quality": "medium"}),
+    # Compact archives (.psdz), documents without images only.
+    ("report_3p", "text_report", {"quality": "ultra_low", "compact": True}),
+    ("report_3p", "text_report", {"quality": "medium", "compact": True}),
+    ("table_12r", "tiny_table", {"quality": "medium", "compact": True}),
+    ("sheet", "bordered_sheet", {"quality": "ultra_low", "compact": True}),
+    ("sheet", "bordered_sheet", {"quality": "medium", "compact": True}),
 ]
+
+# A compact archive of text_report at "medium", written by 2.5.0 and stored
+# as it travels. Whatever the encoder writes in future, this file must still
+# rebuild to the same text.
+COMPACT_SAMPLE = os.path.join(os.path.dirname(__file__), "vectors",
+                              "sample-2.5.0-medium.psdz")
 
 
 def _case_key(name: str, options: dict) -> str:
@@ -122,6 +140,23 @@ class TestGoldenVectors(unittest.TestCase):
                 "archive bytes changed, which breaks interoperability with "
                 "stations running another implementation:\n" + detail
             )
+
+
+class TestCompactSample(unittest.TestCase):
+    def test_the_stored_sample_still_rebuilds_to_the_same_text(self):
+        with open(COMPACT_SAMPLE, "rb") as handle:
+            sample = handle.read()
+        self.assertEqual(psdi.peek_version(sample), psdi.ARCHIVE_VERSION_COMPACT_STRUCT)
+        self.assertEqual(psdi.compact_body_kind(sample), "columns")
+        with tempfile.TemporaryDirectory() as directory:
+            path = fixtures.text_report(os.path.join(directory, "report.pdf"))
+            classic, _ = engine.pdf_to_archive(path, quality="medium")
+        rebuilt, info = engine.archive_to_pdf(sample)
+        self.assertTrue(info["crc_ok"])
+        self.assertEqual(TestOriginalDecoder._words(rebuilt),
+                         TestOriginalDecoder._words(engine.archive_to_pdf(classic)[0]))
+        self.assertEqual(psdi.read_compact_struct(sample).manifest,
+                         psdi.read_struct(classic).manifest)
 
 
 class TestLegacyDecoder(unittest.TestCase):
@@ -242,7 +277,10 @@ class TestFormatConstants(unittest.TestCase):
         self.assertEqual(psdi.ARCHIVE_MAGIC, b"PSDI")
         self.assertEqual(psdi.ARCHIVE_VERSION_STRUCT, 1)
         self.assertEqual(psdi.ARCHIVE_VERSION_IMAGE, 2)
+        self.assertEqual(psdi.ARCHIVE_VERSION_COMPACT_STRUCT, 3)
+        self.assertEqual(psdi.ARCHIVE_VERSION_COMPACT_IMAGE, 4)
         self.assertEqual(psdi.FLAG_LZMA, 0x01)
+        self.assertEqual((psdi.EXTENSION, psdi.COMPACT_EXTENSION), (".psdi", ".psdz"))
 
     def test_header_layout(self):
         # Field widths are fixed by the specification.
@@ -403,6 +441,26 @@ class TestOriginalDecoder(unittest.TestCase):
                         self.assertAlmostEqual(ga[2][0], gb[2][0], delta=0.001)
                         self.assertAlmostEqual(ga[2][1], gb[2][1], delta=0.001)
                         self.assertAlmostEqual(ga[3], gb[3], delta=0.001)
+
+    def test_compact_archives_are_refused_by_number(self):
+        # A .psdz reaching a station that runs the original must be turned
+        # away with a clear message, never half-read into a damaged document.
+        cases = (
+            ({"quality": "low"}, psdi.ARCHIVE_VERSION_COMPACT_STRUCT),
+            ({"quality": "ultra_low", "mode": engine.MODE_IMAGE},
+             psdi.ARCHIVE_VERSION_COMPACT_IMAGE),
+        )
+        for options, version in cases:
+            with self.subTest(version=version):
+                data, _ = engine.pdf_to_archive(self.paths["rich_report"],
+                                                compact=True, **options)
+                self.assertEqual(psdi.peek_version(data), version)
+                with self.assertRaises(ValueError) as caught:
+                    self.original.archive_to_pdf(data)
+                self.assertIn(f"non supportée: {version}", str(caught.exception))
+                report = self.original.validate_archive(data)
+                self.assertFalse(report["valid"])
+                self.assertIn(str(version), report["error"])
 
     def test_png_payloads_are_placed(self):
         data, _ = engine.pdf_to_archive(self.paths["graphics_report"], quality="medium")
