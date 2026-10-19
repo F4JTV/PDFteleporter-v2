@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Side-by-side benchmark: F1GBD psdi_lib 2.1.0 (loaded from its .pyc) vs our psditool.
 
 Usage: python3 bench.py <psdi_lib.pyc> <v2 application dir> <outdir>

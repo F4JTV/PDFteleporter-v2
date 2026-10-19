@@ -6,6 +6,8 @@ Winlink Express), et les recompose en PDF lisibles à la réception.
 
 Un SITREP de 600 ko qui demanderait un quart d'heure en VARA HF tient dans
 environ 120 ko et passe en trois minutes, sa mise en page intacte à l'arrivée.
+Entre stations équipées de la version 2.5.0 ou plus, l'archive compacte `.psdz`
+retire encore 20 à 45 % de ce poids.
 
 ---
 
@@ -40,6 +42,12 @@ une station qui utilise la version de F1GBD doit pouvoir recomposer ce que cette
 version émet, et réciproquement. Toutes les optimisations décrites plus bas ont
 été retenues précisément parce qu'elles restent lisibles par un décodeur écrit
 sur la spécification d'origine.
+
+La version 2.5.0 ajoute un second format, `.psdz`, que le décodeur de F1GBD ne
+sait pas lire. Il ne sert qu'entre stations équipées de cette version ou d'une
+suivante et n'est produit que sur demande explicite ; un `.psdi` émis par la
+2.5.0 est identique octet pour octet à celui de la 2.4.1 (voir « Archives
+compactes `.psdz` »).
 
 Cette compatibilité est vérifiée contre le vrai moteur de F1GBD, pas contre
 l'idée qu'on s'en fait : `reference/tools/bench.py` charge `psdi_lib` 2.1.0
@@ -77,7 +85,10 @@ python pdfteleporter.py
 ```
 
 Python 3.10 ou ultérieur. Aucune compilation nécessaire pour un usage depuis les
-sources.
+sources. Les archives compactes `.psdz` demandent un Pillow qui sait traiter
+l'AVIF : les roues de la 11.3 et des suivantes l'embarquent, sauf celles de
+Windows ARM64, et `requirements.txt` exige la 11.3. L'exécutable Windows,
+construit en x64, l'a sur toutes les machines, Arm64 comprises.
 
 ## Utilisation
 
@@ -90,9 +101,19 @@ temps à le recomposer.
 
 L'interface est en français et suit le réglage clair/sombre de Windows.
 
-L'interface accepte le **glisser-déposer** d'un `.pdf` ou d'un `.psdi` : le
-fichier part dans le bon panneau selon son extension, sans qu'il faille viser la
-bonne moitié de la fenêtre. Un dépôt multiple est refusé plutôt que deviné.
+L'interface accepte le **glisser-déposer** d'un `.pdf`, d'une image, d'un
+`.psdi` ou d'un `.psdz` : le fichier part dans le bon panneau selon son
+extension, sans qu'il faille viser la bonne moitié de la fenêtre. Un dépôt
+multiple est refusé plutôt que deviné.
+
+La case **Compatible avec la version F1GBD (archive .psdi)** est cochée à chaque
+démarrage. Décochée, la compression produit une archive compacte `.psdz`,
+nettement plus légère mais lisible seulement par PDF Teleporter 2.5.0 et plus ;
+l'estimation de taille suit l'état de la case, et le journal rappelle la
+restriction après chaque compression compacte. La case n'est pas mémorisée d'une
+session à l'autre, volontairement : une archive que la station destinataire ne
+sait pas ouvrir coûte une demande et une seconde émission, bien plus que les
+octets gagnés.
 
 Les **estimations sont mesurées, pas devinées**. L'archive est réellement
 compressée en mémoire, en arrière-plan, ce qui donne la taille exacte et non un
@@ -108,16 +129,23 @@ estimait par coefficient.
 
 ### Menu contextuel de l'Explorateur
 
-*Outils → Ajouter au menu contextuel de l'Explorateur* enregistre deux verbes :
+*Outils → Ajouter au menu contextuel de l'Explorateur* enregistre trois verbes :
 
-- clic droit sur un `.pdf` → **Téléporter : compresser en .psdi**, qui ouvre un
+- clic droit sur un `.pdf` ou une image (JPEG, PNG, BMP, TIFF, WebP) →
+  **Téléporter : compresser en .psdi (compatible F1GBD)**, qui ouvre un
   sous-menu en cascade proposant les quatre qualités, du transfert le plus
   rapide au plus lent
-- clic droit sur un `.psdi` → **Téléporter : recomposer le PDF**
+- au même endroit, **Téléporter : compresser en .psdz (compact)**, même
+  sous-menu, pour l'archive compacte
+- clic droit sur un `.psdi` ou un `.psdz` → **Téléporter : recomposer le PDF**
 
 Le choix de la qualité est la seule décision que l'opérateur ait réellement à
 prendre ; l'obliger à ouvrir l'interface pour la prendre viderait le clic droit
-de son intérêt.
+de son intérêt. Celui du format décide des stations qui pourront lire le
+fichier : il se fait donc là où il se voit, dans le libellé de l'entrée, et
+l'extension le montre ensuite. Chaque format a son type de fichier dans
+l'Explorateur, « Archive PDF Teleporter » et « Archive compacte PDF
+Teleporter ».
 
 Sous Windows 11, ces entrées apparaissent sous *Afficher plus d'options* (ou
 Maj+F10). Atteindre le menu de premier niveau exige une extension shell MSIX
@@ -127,8 +155,9 @@ signée, disproportionnée pour un outil employé quelques fois par exercice.
 
 ```
 python pdfteleporter.py compress SITREP.pdf -q low
+python pdfteleporter.py compress SITREP.pdf -q low --compact
 python pdfteleporter.py rebuild  SITREP.psdi -o sortie.pdf
-python pdfteleporter.py inspect  SITREP.psdi
+python pdfteleporter.py inspect  SITREP.psdz
 python pdfteleporter.py presets
 python pdfteleporter.py shell install
 ```
@@ -308,6 +337,7 @@ visible en réception :
 | Glisser-déposer, pas de menu contextuel | Glisser-déposer et menu contextuel Explorateur |
 | Installateur Windows (depuis la 2.1.0) ou archive 7z portable | Installateur Inno Setup 7, ressources de version Windows |
 | Couche TNC/VARA et gestionnaire de transfert embarqués | Compression seule ; l'émission est laissée à Winlink |
+| Un format, `.psdi` | `.psdi` inchangé, et au choix `.psdz`, compact (2.5.0) |
 
 Le moteur d'origine était déjà une bibliothèque autonome sans dépendance à
 l'IHM — l'auteur l'avait conçue pour être appelée depuis son application TCQ.
@@ -340,7 +370,9 @@ préréglage `high` sur un document de photographies — les deux moteurs se
 valent, ce qui est attendu : les paramètres JPEG sont ceux du format. Depuis la
 2.4.0, aucune ligne n'est plus lourde que l'original, y compris celle des
 bordures à `medium`, qui porte pourtant les traits du tableau LibreOffice que
-l'original ne stocke pas du tout (voir la 2.3.0 et la 2.4.0).
+l'original ne stocke pas du tout (voir la 2.3.0 et la 2.4.0). La 2.5.0 émet
+les mêmes `.psdi` octet pour octet ; l'archive compacte `.psdz` est mesurée à
+part, plus bas.
 
 Le détail de chaque changement, mesuré isolément, suit. Les pourcentages de ce
 tableau-ci sont des avant/après sur notre propre moteur, pas des écarts à
@@ -756,6 +788,116 @@ fonctionnelle n'est modifiée : les vecteurs de référence sont identiques.
 `tests/test_notices.py` vérifie que tout nouveau fichier porte son en-tête et
 que les versions de l'installateur et des exécutables concordent.
 
+### Archives compactes `.psdz` (version 2.5.0)
+
+Toutes les versions précédentes ont gagné à l'intérieur du format `.psdi`, sous
+la contrainte que pose le décodeur de F1GBD. Cette contrainte a un prix : le
+manifeste reste du JSON, qui répète à chaque fragment ses noms de clés et écrit
+ses nombres en toutes lettres, et les photographies restent des JPEG. La 2.5.0
+ajoute un second format qui lève les deux, au prix de la compatibilité :
+l'archive compacte, enregistrée sous l'extension `.psdz`. Sur les quatre
+documents réels des sections précédentes, tailles en octets :
+
+| Document | Préréglage | F1GBD 2.1.0 | `.psdi` | `.psdz` | `.psdz` / `.psdi` | `.psdz` / F1GBD |
+|---|---|---|---|---|---|---|
+| SITREP OMS | `ultra_low` | 64 301 | 44 091 | 28 366 | −36 % | −56 % |
+| SITREP OMS | `low` | 93 884 | 65 643 | 40 630 | −38 % | −57 % |
+| SITREP OMS | `medium` | 124 656 | 102 071 | 60 994 | −40 % | −51 % |
+| SITREP OMS | `high` | 166 411 | 140 703 | 80 950 | −42 % | −51 % |
+| Point de situation LibreOffice | `ultra_low`, `low` | 11 556 | 10 105 | 6 176 | −39 % | −47 % |
+| Point de situation LibreOffice | `medium`, `high` | 11 556 | 10 879 | 6 974 | −36 % | −40 % |
+| Point de situation Excel | `ultra_low`, `low` | 24 592 | 11 506 | 6 230 | −46 % | −75 % |
+| Point de situation Excel | `medium`, `high` | 24 592 | 10 979 | 6 213 | −43 % | −75 % |
+| Bilan préfectoral | `ultra_low` | 15 719 | 7 822 | 6 194 | −21 % | −61 % |
+| Bilan préfectoral | `low` | 21 012 | 8 372 | 6 587 | −21 % | −69 % |
+| Bilan préfectoral | `medium` | 25 137 | 10 268 | 8 099 | −21 % | −68 % |
+| Bilan préfectoral | `high` | 26 442 | 10 832 | 8 589 | −21 % | −68 % |
+
+Sur les seize archives : 476 740 → 291 595 octets (−39 %), contre 682 154 pour
+`psdi_lib` 2.1.0 (−57 %). Le SITREP à « Moyenne » passe de 8 min 06 s à
+4 min 50 s en VARA HF selon l'estimation de l'application. Chacune des seize
+archives compactes se recompose avec exactement les mêmes mots que son `.psdi`.
+
+**Seulement sur demande.** Le décodeur de F1GBD ne lit pas ce format. Il le
+refuse proprement, « Version d'archive non supportée: 3 », sans rien en tirer
+de faux — la suite le vérifie sur son bytecode —, mais la station qui le reçoit
+devra redemander le document. D'où les garde-fous : la case « Compatible avec la
+version F1GBD (archive .psdi) » est cochée à chaque démarrage, le menu
+contextuel a une entrée par format, le CLI une option `--compact`, et
+l'extension annonce le format avant l'envoi. Le décodeur, lui, se fie au numéro
+de version inscrit dans le fichier, pas à l'extension. Le `.psdi` n'a pas bougé
+d'un octet : les vecteurs de référence de la 2.4.1 passent tels quels.
+
+**Le manifeste en colonnes** (version 3 du conteneur). Le contenu est celui du
+manifeste JSON, rangé autrement : les boîtes de toutes les lignes ensemble,
+chacune codée par différence avec la précédente ; les styles de fragment —
+corps, couleur, graisse, famille — dans une table, chaque fragment n'en portant
+que le numéro ; les dessins regroupés par style, chacun codé par rapport au
+précédent du même style ; tout le texte d'un seul tenant à la fin. Les nombres
+sont des entiers de longueur variable, en unités de la précision du préréglage,
+et LZMA compresse ensuite l'ensemble comme avant. Décodé, ce corps redonne
+exactement le manifeste JSON de la version 1 : l'encodeur le vérifie avant
+d'écrire, et un manifeste que les colonnes ne sauraient pas décrire part en
+JSON dans le corps compact plutôt que d'être approché. Le manifeste compressé
+perd de 20 % (bilan préfectoral) à 46 % (Excel).
+
+**Les photographies en AVIF, à fidélité au moins égale.** L'AVIF, issu du
+codec vidéo AV1, rend une image comparable à celle d'un JPEG en bien moins
+d'octets — encore faut-il vérifier « comparable ». Pour chaque photographie,
+l'encodeur produit d'abord le JPEG que le `.psdi` aurait stocké et mesure sa
+fidélité à l'image source par deux mesures, le PSNR et le SSIM. Il cherche
+ensuite par dichotomie la qualité AVIF la plus basse qui égale ou dépasse ce
+JPEG **sur les deux**. Le WebP est essayé aussi sur les petites images, où
+l'AVIF a peu de prise, et le plus petit des candidats qui passent l'emporte, le
+JPEG compris : une image où rien ne gagne reste un JPEG. Une illustration
+stockée en PNG passe en WebP sans perte, aux mêmes pixels. Les images perdent
+39 à 45 % sur le SITREP selon le préréglage, 17 à 26 % sur les deux petites
+illustrations du bilan préfectoral.
+
+Le double critère n'est pas une précaution de principe. Avec le PSNR seul, la
+recherche retenait sur quatre images un AVIF plus lisse, au PSNR au moins égal
+mais au SSIM inférieur — moins net à l'œil. Le résultat final a été recontrôlé
+indépendamment, avec le SSIM de référence de scikit-image, sur 116 images —
+photographies, illustrations et pages entières de sept documents aux quatre
+préréglages : 114 recodées, aucune moins fidèle que l'image qu'elle remplace.
+
+**Les pages en image** (version 4 du conteneur) — scans, pages pivotées —
+reçoivent la même recherche, page par page : −60 à −69 % sur le document pivoté
+de la suite de tests.
+
+**Ce que cela coûte.**
+
+- *Le temps de compression.* Chercher la qualité AVIF code chaque photographie
+  plusieurs fois : le SITREP se compresse en 3,8 à 7,1 s au lieu de 1,0 à
+  1,5 s selon le préréglage. Les documents sans photographie restent sous la
+  seconde. L'estimation de taille de l'interface, qui compresse réellement,
+  prend le même temps.
+- *Le poids du PDF recomposé.* MuPDF ne sait incorporer ni l'AVIF ni le WebP :
+  le décodeur les décode avec Pillow et range les pixels sans perte. Le SITREP
+  recomposé à « Moyenne » pèse 1,66 Mo au lieu de 593 ko — sans effet sur la
+  transmission, puisque c'est l'archive qui voyage, et sans perte ajoutée. La
+  recomposition dure toujours environ une seconde.
+- *Une dépendance plus récente.* Pillow 11.3 ou ultérieur, première version
+  dont les roues embarquent l'AVIF. Lancé depuis les sources avec un Pillow
+  qui ne l'a pas, le décodeur refuse un `.psdz` contenant de l'AVIF avant de
+  rien recomposer, avec un message qui dit quoi installer ; le `.spec` refuse
+  de construire un exécutable sans ce codec.
+
+**Essayé et écarté** :
+
+| Piste | Mesure | Décision |
+|---|---|---|
+| AVIF apparié au JPEG sur le seul PSNR | quatre images moins nettes (SSIM inférieur) | remplacé par le double critère |
+| JPEG XL | greffon tiers nécessaire pour Pillow, et MuPDF ne le lit pas non plus | écarté |
+
+Au passage, un défaut ancien corrigé : depuis que la compression du PDF est un
+sous-menu en cascade (série 2.0), la détection du menu contextuel cherchait sous
+ce verbe une commande qu'il n'a plus. Le menu se lisait donc toujours absent —
+*Outils* proposait de l'ajouter alors qu'il l'était, jamais de le retirer, et
+`psditool shell status` répondait « non installé ». Elle cherche désormais la
+commande du verbe de recomposition, qui en a une dans toutes les dispositions
+que cet outil a écrites.
+
 ### Correctifs
 
 **Rotation ignorée en mode texte seul.** L'original désactive entièrement la
@@ -846,6 +988,15 @@ utile manque ou que MuPDF ne sait pas lire n'est plus une défaillance : elle
 est sautée avec un avertissement dans le journal, et le reste de la page se
 recompose (voir « Relu avant publication »).
 
+Le corps d'une archive compacte est lu avec la même méfiance, et plus de
+raisons de l'exercer : un format binaire en colonnes n'a pas la syntaxe JSON
+pour trahir une corruption. Table des sections tronquée, données en trop après
+la dernière page, nombre trop long, page décrite deux fois, numéro de style
+inexistant, texte qui n'est pas de l'UTF-8 : chaque cas remonte une `PsdiError`
+qui nomme ce qui ne va pas, et `tests/test_compact.py` abîme une archive de
+chacune de ces façons. Une image AVIF ou WebP n'est décodée que sous un plafond
+de 50 mégapixels.
+
 ---
 
 ## Tests
@@ -854,13 +1005,15 @@ recompose (voir « Relu avant publication »).
 python -m unittest discover -s tests -t .
 ```
 
-188 tests, sans dépendance en plus de celles de l'application.
+243 tests, sans dépendance en plus de celles de l'application.
 
 | Fichier | Objet |
 |---|---|
 | `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles, dictionnaire LZMA, coordonnées à largeur fixe |
 | `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, codage du texte, codec des images |
-| `tests/test_interop.py` | vecteurs de référence, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, bordures, images, place des glyphes) |
+| `tests/test_compact.py` | archives `.psdz` : manifeste en colonnes rendu à l'identique, repli JSON, corps abîmés, choix AVIF et WebP à fidélité au moins égale, pages en image, ligne de commande |
+| `tests/test_interop.py` | vecteurs de référence `.psdi` et `.psdz`, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, bordures, images, place des glyphes, refus des `.psdz`) |
+| `tests/test_shell.py` | menu contextuel : forme des clés de registre, une cascade par format, commandes comprises par le CLI, détection et désinstallation |
 | `tests/test_notices.py` | en-têtes de copyright et SPDX, mentions de la fenêtre À propos et de `--version`, concordance des versions |
 
 Les documents de test sont construits par `tests/fixtures.py` plutôt que livrés
@@ -887,6 +1040,15 @@ python -m tests.test_interop --update
 ```
 
 à ne faire que délibérément, en documentant pourquoi la sortie a changé.
+
+Depuis la 2.5.0, cinq vecteurs figent aussi des archives compactes, sur des
+documents sans image : les octets AVIF et WebP dépendent de la version des
+bibliothèques que Pillow embarque, qui n'est pas du ressort de ce projet. Les
+images compactes sont couvertes par des tests de propriété — taille, fidélité
+mesurée — plutôt que d'empreinte. `tests/vectors/sample-2.5.0-medium.psdz`
+protège l'autre sens : écrite par la 2.5.0 et conservée telle quelle, cette
+archive doit continuer à se recomposer à l'identique quel que soit l'avenir de
+l'encodeur, puisque des stations en garderont.
 
 ### Décodage historique
 
@@ -916,8 +1078,10 @@ qui l'a produit —, nos archives de cinq documents de test, à trois prérégla
 sont recomposées par le vrai décodeur de F1GBD : même texte que par le nôtre,
 bordures LibreOffice présentes, images PNG placées, et chaque glyphe à moins
 d'un millième de point de sa place quand la boîte de ligne est ouverte (voir
-la 2.4.0). Ailleurs, ces quatre tests sont sautés, pas échoués. `PSDI_REFERENCE_PYC` peut désigner le fichier
-explicitement.
+la 2.4.0). Une archive compacte, structurée ou en image, y est refusée par son
+numéro de version, avec un message, au lieu d'être lue de travers. Ailleurs, ces
+cinq tests sont sautés, pas échoués. `PSDI_REFERENCE_PYC` peut désigner le
+fichier explicitement.
 
 ---
 
@@ -940,6 +1104,15 @@ version 2 — image de page
     uint16  nombre de pages
     par page : float32 largeur | float32 hauteur | uint8 drapeaux |
                uint32 longueur | octets
+
+version 3 — structuré compact (.psdz)
+    uint32  crc32 du corps non compressé
+    uint32  longueur du corps compressé
+    octets  corps, flux LZMA brut, filtre LZMA2 unique
+    uint16  nombre d'images, puis les images comme en version 1
+
+version 4 — image de page compacte (.psdz)
+    disposition de la version 2
 ```
 
 Le bit 0 des drapeaux signale une charge utile compressée en LZMA. Il n'est pas
@@ -955,6 +1128,37 @@ d'origine.
 
 **Cette disposition ne doit pas être modifiée.** Réordonner ou redimensionner un
 champ rompt l'interopérabilité avec les stations en service.
+
+Les versions 3 et 4 sont les archives compactes. Elles gardent la signature et
+le champ de version, si bien qu'un lecteur antérieur — celui de F1GBD compris —
+les refuse par leur numéro au lieu de les lire de travers. Une charge utile y
+peut aussi être un AVIF ou un WebP, reconnus à leur signature comme le JPEG et
+le PNG ; MuPDF ne sachant incorporer ni l'un ni l'autre, le décodeur les décode
+avec Pillow et place les pixels sans perte.
+
+Le corps de la version 3 commence par un octet. `1` : la suite est le manifeste
+JSON d'une archive de version 1, écrit tel quel pour un manifeste que les
+colonnes ne savent pas décrire. `0` : la suite est faite de onze sections,
+chacune une longueur `uint32` suivie de ses octets :
+
+| Section | Contenu |
+|---|---|
+| en-tête | JSON : les clés de premier niveau du manifeste autres que `pages`, le nombre de pages, l'échelle des coordonnées (1, 10 ou 100 unités par point), les tables de styles de fragment et de dessin, et si les références d'images étaient des chaînes |
+| pages | par page : masque des clés présentes, numéro, nombres d'éléments, coin de boîte ouverte |
+| lignes | par ligne : nombre de fragments et deux drapeaux (boîte ouverte, boîte de fragment présente) |
+| boîtes de ligne | codées par différence avec la ligne précédente |
+| fragments | par fragment : numéro dans la table des styles |
+| boîtes de fragment | relatives à leur ligne |
+| styles de dessin | par dessin : numéro dans la table des styles de dessin |
+| boîtes de dessin | codées par différence avec le dessin précédent du même style |
+| compléments | placements d'images, cases de formulaire cochées, zones de liens |
+| longueurs | longueur en octets de chaque chaîne, dans l'ordre |
+| texte | toutes les chaînes, en UTF-8, mises bout à bout |
+
+Les nombres des sections entières sont des entiers LEB128, les signés en
+zigzag ; une coordonnée est un entier en unités de 1/échelle de point. Le
+décodage redonne un manifeste égal à celui qui a été encodé, ce que l'encodeur
+vérifie avant de retenir les colonnes.
 
 Le manifeste JSON est lui aussi un contrat. Les clés que cette version écrit en
 plus de la spécification d'origine sont toutes *optionnelles* et ignorées par un
@@ -1043,7 +1247,9 @@ installées dans un Python, PyInstaller lancé sous un autre. La commande
 Les deux extrémités sont désormais protégées : le `.spec` refuse de construire
 si PyMuPDF, Pillow ou PyQt6 n'est pas importable, en nommant l'interpréteur
 qu'il a testé, et `build.cmd` vérifie après coup que `_internal\pymupdf` existe
-réellement.
+réellement. Depuis la 2.5.0, il refuse aussi un Pillow qui ne sait pas traiter
+l'AVIF et le WebP : l'exécutable produit ne saurait pas recomposer les `.psdz`
+qu'on lui enverrait.
 
 PyMuPDF ne fournit aucun hook PyInstaller et PyInstaller n'en embarque pas non
 plus ; ses extensions compilées sont donc collectées explicitement. Les motifs

@@ -69,12 +69,26 @@ def _notify(title: str, message: str, error: bool = False) -> None:
         print(f"{title} : {message}", file=sys.stderr)
 
 
+def default_archive_path(source: str, compact: bool) -> str:
+    """Where an archive of `source` goes when no name is given."""
+    extension = psdi.COMPACT_EXTENSION if compact else psdi.EXTENSION
+    return os.path.splitext(source)[0] + extension
+
+
+def format_label(compact: bool) -> str:
+    """How the two archive formats are named to the operator."""
+    if compact:
+        return ".psdz (compact, lisible par PDF Teleporter 2.5.0 et plus)"
+    return ".psdi (compatible avec la version F1GBD)"
+
+
 def cmd_compress(path: str, quality: str, output: str | None,
-                 skip_images: bool, quiet: bool) -> int:
-    output = output or os.path.splitext(path)[0] + ".psdi"
+                 skip_images: bool, quiet: bool, compact: bool = False) -> int:
+    output = output or default_archive_path(path, compact)
     try:
         _, info = engine.pdf_to_archive(
-            path, quality=quality, output_path=output, skip_images=skip_images
+            path, quality=quality, output_path=output, skip_images=skip_images,
+            compact=compact,
         )
     except Exception as exc:  # noqa: BLE001
         if not quiet:
@@ -89,7 +103,8 @@ def cmd_compress(path: str, quality: str, output: str | None,
         f"{format_bytes(info['archive_size'])} "
         f"({format_percent(info['ratio_percent'])})\n"
         f"Mode : {MODE_LABELS.get(info['mode'], info['mode'])}   "
-        f"Qualité : {QUALITY_LABELS.get(info['quality'], info['quality'])}\n\n"
+        f"Qualité : {QUALITY_LABELS.get(info['quality'], info['quality'])}\n"
+        f"Format : {format_label(compact)}\n\n"
         f"Packet 1200 : {format_duration(times[MODE_PACKET_1200])}\n"
         f"VARA HF     : {format_duration(times[MODE_VARA_HF])}\n"
         f"VARA FM     : {format_duration(times[MODE_VARA_FM_NARROW])}"
@@ -156,6 +171,10 @@ def cmd_inspect(path: str) -> int:
             elif value is None:
                 value = "-"
             print(f"{_INSPECT_LABELS.get(key, key):>12} : {value}")
+        if report["version"] in (psdi.ARCHIVE_VERSION_STRUCT, psdi.ARCHIVE_VERSION_IMAGE,
+                                 *psdi.COMPACT_VERSIONS):
+            compact = report["version"] in psdi.COMPACT_VERSIONS
+            print(f"{'format':>12} : {format_label(compact)}")
     except BrokenPipeError:
         # Piping into head or less closes stdout early; that is not an error.
         return 0
@@ -192,7 +211,8 @@ class _VersionAction(argparse.Action):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="psditool",
-        description="Convertit des documents PDF en archives radio .psdi et inversement.",
+        description="Convertit des documents PDF en archives radio .psdi (ou .psdz "
+                    "compactes) et inversement.",
     )
     parser.add_argument("--version", action=_VersionAction)
     parser.add_argument("--verbose", action="store_true",
@@ -202,15 +222,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
 
-    compress = sub.add_parser("compress", help="PDF ou image -> .psdi")
+    compress = sub.add_parser("compress", help="PDF ou image -> .psdi ou .psdz")
     compress.add_argument("input")
     compress.add_argument("-o", "--output")
     compress.add_argument("-q", "--quality", default=QUALITY_MEDIUM,
                           choices=list(QUALITY_ORDER))
     compress.add_argument("--no-images", action="store_true",
                           help="texte seul, supprimer toutes les images")
+    compress.add_argument("--compact", action="store_true",
+                          help="archive compacte .psdz : plus légère, mais lisible "
+                               "seulement par PDF Teleporter 2.5.0 et plus")
 
-    rebuild = sub.add_parser("rebuild", help=".psdi -> PDF")
+    rebuild = sub.add_parser("rebuild", help=".psdi ou .psdz -> PDF")
     rebuild.add_argument("input")
     rebuild.add_argument("-o", "--output")
 
@@ -236,10 +259,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
     # The context menu passes a single file with a --compress / --rebuild
-    # flag, optionally followed by --quality, which is shorter to encode in a
-    # registry command string than the full subcommand form.
+    # flag, optionally followed by --quality and --compact, which is shorter
+    # to encode in a registry command string than the full subcommand form.
     if argv and argv[0] in ("--compress", "--rebuild") and len(argv) >= 2:
         action, target = argv[0], argv[1]
+        compact = "--compact" in argv[2:]
         quality = QUALITY_MEDIUM
         if "--quality" in argv[2:]:
             position = argv.index("--quality")
@@ -254,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
         logging.basicConfig(level=logging.WARNING)
         if action == "--compress":
-            return cmd_compress(target, quality, None, False, False)
+            return cmd_compress(target, quality, None, False, False, compact)
         return cmd_rebuild(target, None, False)
 
     args = build_parser().parse_args(argv)
@@ -265,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "compress":
         return cmd_compress(args.input, args.quality, args.output,
-                            args.no_images, args.quiet)
+                            args.no_images, args.quiet, args.compact)
     if args.command == "rebuild":
         return cmd_rebuild(args.input, args.output, args.quiet)
     if args.command == "inspect":

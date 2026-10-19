@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """PDF Teleporter: PDF <-> .psdi conversion for narrow-bandwidth radio links."""
 
-__version__ = "2.4.1"
+__version__ = "2.5.0"
 
 # Legal notices, kept in one place so the About box, the command line and the
 # tests cannot drift apart. GPL v3 section 5(d) requires an interactive user

@@ -2,10 +2,17 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Explorer context-menu integration for Windows.
 
-Two verbs are registered:
+These verbs are registered:
 
-    right-click a .pdf   -> Téléporter : compresser en .psdi
-    right-click a .psdi  -> Téléporter : recomposer le PDF
+    right-click a .pdf or an image
+        -> Téléporter : compresser en .psdi (compatible F1GBD)  > quality
+        -> Téléporter : compresser en .psdz (compact)           > quality
+    right-click a .psdi or a .psdz
+        -> Téléporter : recomposer le PDF
+
+The two compress entries are separate on purpose: which format a file is sent
+in decides which stations can read it, so the choice is made where it is
+visible, in the menu label, and the file's extension shows it afterwards.
 
 The verb labels are French because they appear in the operator's Explorer;
 everything else in this file stays in English like the rest of the code.
@@ -35,10 +42,16 @@ SCOPE_USER = "user"
 SCOPE_MACHINE = "machine"
 
 PROGID = "PDFteleporter.psdi"
+COMPACT_PROGID = "PDFteleporter.psdz"
 GUI_EXE_NAME = "PDFteleporter.exe"
 
-# Relative to the chosen root; identical under HKCU and HKLM.
+# Relative to the chosen root; identical under HKCU and HKLM. Explorer lists
+# static verbs by key name, so the compatible entry comes before the compact
+# one.
 PDF_VERB_KEY = r"Software\Classes\SystemFileAssociations\.pdf\shell\PDFteleporterCompress"
+PDF_COMPACT_VERB_KEY = (
+    r"Software\Classes\SystemFileAssociations\.pdf\shell\PDFteleporterCompressCompact"
+)
 
 # The same cascade is attached to each image type. Explorer keys verbs by
 # extension, so one key per extension is unavoidable; SystemFileAssociations
@@ -49,12 +62,38 @@ IMAGE_EXTENSIONS_FOR_MENU = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", "
 
 def _image_verb_key(extension: str) -> str:
     return rf"Software\Classes\SystemFileAssociations\{extension}\shell\PDFteleporterCompress"
+
+
+def _image_compact_verb_key(extension: str) -> str:
+    return (rf"Software\Classes\SystemFileAssociations\{extension}"
+            r"\shell\PDFteleporterCompressCompact")
+
+
 PSDI_EXT_KEY = r"Software\Classes\.psdi"
 PSDI_PROGID_KEY = rf"Software\Classes\{PROGID}"
 PSDI_VERB_KEY = rf"{PSDI_PROGID_KEY}\shell\PDFteleporterRebuild"
+PSDZ_EXT_KEY = r"Software\Classes\.psdz"
+PSDZ_PROGID_KEY = rf"Software\Classes\{COMPACT_PROGID}"
+PSDZ_VERB_KEY = rf"{PSDZ_PROGID_KEY}\shell\PDFteleporterRebuild"
 
-PDF_VERB_LABEL = "Téléporter : compresser en .psdi"
+PDF_VERB_LABEL = "Téléporter : compresser en .psdi (compatible F1GBD)"
+PDF_COMPACT_VERB_LABEL = "Téléporter : compresser en .psdz (compact)"
 PSDI_VERB_LABEL = "Téléporter : recomposer le PDF"
+
+# The file types as Explorer names them.
+PSDI_TYPE_NAME = "Archive PDF Teleporter"
+PSDZ_TYPE_NAME = "Archive compacte PDF Teleporter"
+
+
+def _compress_verb_keys() -> list[tuple[str, str, bool]]:
+    """Every compress cascade: (key, label, compact), PDF and images alike."""
+    keys = [(PDF_VERB_KEY, PDF_VERB_LABEL, False),
+            (PDF_COMPACT_VERB_KEY, PDF_COMPACT_VERB_LABEL, True)]
+    for extension in IMAGE_EXTENSIONS_FOR_MENU:
+        keys.append((_image_verb_key(extension), PDF_VERB_LABEL, False))
+        keys.append((_image_compact_verb_key(extension), PDF_COMPACT_VERB_LABEL, True))
+    return keys
+
 
 # Submenu entries, fastest transfer first. The identifiers are what reaches
 # the command line; only the labels are French.
@@ -100,7 +139,7 @@ def _launcher() -> tuple[str, str]:
     return executable, f'"{os.path.join(package_root, "pdfteleporter.py")}"'
 
 
-def _command(action: str, quality: str | None = None) -> str:
+def _command(action: str, quality: str | None = None, compact: bool = False) -> str:
     executable, prefix = _launcher()
     parts = [f'"{executable}"']
     if prefix:
@@ -108,6 +147,8 @@ def _command(action: str, quality: str | None = None) -> str:
     parts.extend([f"--{action}", '"%1"'])
     if quality:
         parts.extend(["--quality", quality])
+    if compact:
+        parts.append("--compact")
     return " ".join(parts)
 
 
@@ -136,7 +177,8 @@ def _delete_tree(root, path: str) -> None:
         pass
 
 
-def _write_quality_cascade(root, verb_key: str) -> None:
+def _write_quality_cascade(root, verb_key: str, label: str = PDF_VERB_LABEL,
+                           compact: bool = False) -> None:
     """Write the compress-with-quality submenu under one verb key.
 
     A cascade is declared by MUIVerb plus an empty SubCommands value, with
@@ -150,7 +192,7 @@ def _write_quality_cascade(root, verb_key: str) -> None:
     import winreg
 
     with winreg.CreateKey(root, verb_key) as key:
-        winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, PDF_VERB_LABEL)
+        winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, label)
         winreg.SetValueEx(key, "SubCommands", 0, winreg.REG_SZ, "")
         winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
 
@@ -162,15 +204,32 @@ def _write_quality_cascade(root, verb_key: str) -> None:
             winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, label)
         with winreg.CreateKey(root, entry + r"\command") as key:
             winreg.SetValueEx(key, None, 0, winreg.REG_SZ,
-                              _command("compress", quality))
+                              _command("compress", quality, compact))
+
+
+def _write_archive_type(root, ext_key: str, progid: str, progid_key: str,
+                        type_name: str, verb_key: str) -> None:
+    """Give an archive extension a ProgID, a name, an icon and the rebuild verb."""
+    import winreg
+
+    with winreg.CreateKey(root, ext_key) as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, progid)
+    with winreg.CreateKey(root, progid_key) as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, type_name)
+    with winreg.CreateKey(root, progid_key + r"\DefaultIcon") as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, f"{_icon()},0")
+
+    with winreg.CreateKey(root, verb_key) as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PSDI_VERB_LABEL)
+        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
+    with winreg.CreateKey(root, verb_key + r"\command") as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, _command("rebuild"))
 
 
 def install(scope: str = SCOPE_USER) -> None:
-    """Register both verbs, replacing any earlier registration entirely."""
+    """Register every verb, replacing any earlier registration entirely."""
     if not is_supported():
         raise RuntimeError("Context-menu integration is Windows-only")
-
-    import winreg
 
     root = _root(scope)
 
@@ -180,33 +239,24 @@ def install(scope: str = SCOPE_USER) -> None:
     # ignore SubCommands entirely -- the submenu then never opens, with no
     # error anywhere. Deleting first is the only way to be sure the key holds
     # what this version intends and nothing else.
-    _delete_tree(root, PDF_VERB_KEY)
+    for verb_key, _label, _compact in _compress_verb_keys():
+        _delete_tree(root, verb_key)
     _delete_tree(root, PSDI_VERB_KEY)
-    for extension in IMAGE_EXTENSIONS_FOR_MENU:
-        _delete_tree(root, _image_verb_key(extension))
+    _delete_tree(root, PSDZ_VERB_KEY)
 
-    # Every compressible type gets the same cascading submenu. Which preset
-    # to use is the one decision the operator actually has to make, and
-    # forcing them through the full interface to make it defeats the point
-    # of a right-click.
-    for verb_key in (PDF_VERB_KEY,
-                     *(_image_verb_key(e) for e in IMAGE_EXTENSIONS_FOR_MENU)):
-        _write_quality_cascade(root, verb_key)
+    # Every compressible type gets the same two cascading submenus, one per
+    # archive format. Which preset to use is the one decision the operator
+    # actually has to make, and forcing them through the full interface to
+    # make it defeats the point of a right-click.
+    for verb_key, label, compact in _compress_verb_keys():
+        _write_quality_cascade(root, verb_key, label, compact)
 
-    # Give .psdi a ProgID of its own so the file type has a name and an icon
-    # in Explorer, not just a verb.
-    with winreg.CreateKey(root, PSDI_EXT_KEY) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PROGID)
-    with winreg.CreateKey(root, PSDI_PROGID_KEY) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, "Archive PDF Teleporter")
-    with winreg.CreateKey(root, PSDI_PROGID_KEY + r"\DefaultIcon") as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, f"{_icon()},0")
-
-    with winreg.CreateKey(root, PSDI_VERB_KEY) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, PSDI_VERB_LABEL)
-        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, _icon())
-    with winreg.CreateKey(root, PSDI_VERB_KEY + r"\command") as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, _command("rebuild"))
+    # Give each archive extension a ProgID of its own so the file type has a
+    # name and an icon in Explorer, not just a verb.
+    _write_archive_type(root, PSDI_EXT_KEY, PROGID, PSDI_PROGID_KEY,
+                        PSDI_TYPE_NAME, PSDI_VERB_KEY)
+    _write_archive_type(root, PSDZ_EXT_KEY, COMPACT_PROGID, PSDZ_PROGID_KEY,
+                        PSDZ_TYPE_NAME, PSDZ_VERB_KEY)
 
     _notify_shell()
 
@@ -225,16 +275,22 @@ def uninstall(scope: str | None = None) -> None:
     scopes = (SCOPE_USER, SCOPE_MACHINE) if scope is None else (scope,)
     for one in scopes:
         root = _root(one)
-        _delete_tree(root, PDF_VERB_KEY)
-        _delete_tree(root, PSDI_PROGID_KEY)
-        _delete_tree(root, PSDI_EXT_KEY)
-        for extension in IMAGE_EXTENSIONS_FOR_MENU:
-            _delete_tree(root, _image_verb_key(extension))
+        for verb_key, _label, _compact in _compress_verb_keys():
+            _delete_tree(root, verb_key)
+        for key in (PSDI_PROGID_KEY, PSDI_EXT_KEY, PSDZ_PROGID_KEY, PSDZ_EXT_KEY):
+            _delete_tree(root, key)
     _notify_shell()
 
 
 def installed_scopes() -> list[str]:
-    """Return the scopes in which the menu is currently registered."""
+    """Return the scopes in which the menu is currently registered.
+
+    The rebuild verb is what is looked for: it is a plain command in every
+    layout this tool has written. The PDF verb is a cascade, which has no
+    command of its own -- checking for one, as this did until 2.5.0, found
+    nothing once the cascade existed, so the menu always read as absent and
+    "remove" was never offered.
+    """
     if not is_supported():
         return []
 
@@ -244,7 +300,7 @@ def installed_scopes() -> list[str]:
     for scope in (SCOPE_USER, SCOPE_MACHINE):
         try:
             winreg.CloseKey(
-                winreg.OpenKey(_root(scope), PDF_VERB_KEY + r"\command")
+                winreg.OpenKey(_root(scope), PSDI_VERB_KEY + r"\command")
             )
             found.append(scope)
         except OSError:

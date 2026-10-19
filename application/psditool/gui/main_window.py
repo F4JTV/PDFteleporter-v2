@@ -55,6 +55,14 @@ _REASONS = {
     "scan": "document scanné",
 }
 
+# How each container version is named to the operator.
+_ARCHIVE_KINDS = {
+    psdi.ARCHIVE_VERSION_STRUCT: "structuré",
+    psdi.ARCHIVE_VERSION_IMAGE: "image de page",
+    psdi.ARCHIVE_VERSION_COMPACT_STRUCT: "structuré compact .psdz",
+    psdi.ARCHIVE_VERSION_COMPACT_IMAGE: "image de page compacte .psdz",
+}
+
 
 def _dim(label: QLabel) -> None:
     """Render a label as secondary text using the palette's disabled role.
@@ -103,7 +111,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self.log("Prêt. Sélectionnez un PDF ou une image à compresser, ou une "
-                 "archive .psdi à recomposer.", "info")
+                 "archive .psdi ou .psdz à recomposer.", "info")
 
     def _size_to_screen(self, width: int, height: int) -> None:
         """Open at the requested size, or smaller when the screen is smaller.
@@ -172,7 +180,7 @@ class MainWindow(QMainWindow):
         return frame
 
     def _build_compress_panel(self) -> QWidget:
-        box = QGroupBox("Compresser  ·  PDF → .psdi")
+        box = QGroupBox("Compresser  ·  PDF → .psdi / .psdz")
         grid = QGridLayout(box)
         grid.setColumnStretch(1, 1)
 
@@ -200,11 +208,25 @@ class MainWindow(QMainWindow):
         self.skip_images.stateChanged.connect(self.update_estimates)
         grid.addWidget(self.skip_images, 2, 1, 1, 2)
 
+        # Checked at every start: an archive the receiving station cannot
+        # open costs a request and a second transmission, far more than the
+        # bytes the compact format saves. Choosing it is deliberate, each time.
+        self.compatible_check = QCheckBox(
+            "Compatible avec la version F1GBD (archive .psdi)")
+        self.compatible_check.setChecked(True)
+        self.compatible_check.setToolTip(
+            "Cochée : archive .psdi, lisible par toutes les stations, version "
+            "F1GBD comprise.\nDécochée : archive compacte .psdz, nettement plus "
+            "légère, lisible seulement par PDF Teleporter 2.5.0 et plus."
+        )
+        self.compatible_check.stateChanged.connect(self.update_estimates)
+        grid.addWidget(self.compatible_check, 3, 1, 1, 2)
+
         self.estimate_label = QLabel("—")
         _dim(self.estimate_label)
         self.estimate_label.setWordWrap(True)
         self.estimate_label.setTextFormat(Qt.TextFormat.RichText)
-        grid.addWidget(self.estimate_label, 3, 0, 1, 3)
+        grid.addWidget(self.estimate_label, 4, 0, 1, 3)
 
         buttons = QHBoxLayout()
         self.compress_btn = QPushButton("Compresser")
@@ -218,13 +240,17 @@ class MainWindow(QMainWindow):
         self.winlink_btn.setEnabled(False)
         buttons.addWidget(self.winlink_btn)
         buttons.addStretch(1)
-        grid.addLayout(buttons, 4, 0, 1, 3)
+        grid.addLayout(buttons, 5, 0, 1, 3)
 
-        grid.setRowStretch(5, 1)
+        grid.setRowStretch(6, 1)
         return box
 
+    def _compact(self) -> bool:
+        """Whether the operator chose the compact .psdz format."""
+        return not self.compatible_check.isChecked()
+
     def _build_rebuild_panel(self) -> QWidget:
-        box = QGroupBox("Recomposer  ·  .psdi → PDF")
+        box = QGroupBox("Recomposer  ·  .psdi / .psdz → PDF")
         grid = QGridLayout(box)
         grid.setColumnStretch(1, 1)
 
@@ -341,7 +367,7 @@ class MainWindow(QMainWindow):
     def browse_psdi(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Sélectionner une archive", "",
-            "Archives PSDI (*.psdi);;Tous les fichiers (*)"
+            "Archives PDF Teleporter (*.psdi *.psdz);;Tous les fichiers (*)"
         )
         if path:
             self.load_psdi(path)
@@ -367,7 +393,7 @@ class MainWindow(QMainWindow):
             self.rebuild_btn.setEnabled(False)
             return
 
-        mode = "structuré" if report["version"] == 1 else "image de page"
+        mode = _ARCHIVE_KINDS.get(report["version"], f"version {report['version']}")
         crc = "CRC correct" if report["checksum_ok"] else "CRC INCORRECT"
         self.validation_label.setText(
             f"Version {report['version']} ({mode}) · {report['pages']} page(s) · {crc}"
@@ -403,15 +429,18 @@ class MainWindow(QMainWindow):
 
         self._estimator = EstimateWorker(
             self._pdf_path, self.quality_combo.currentData(),
-            self.skip_images.isChecked(),
+            self.skip_images.isChecked(), self._compact(),
         )
         self._estimator.finished_ok.connect(self._on_estimate_ready)
         self._estimator.failed.connect(self._on_estimate_failed)
         self._estimator.start()
 
     def _on_estimate_ready(self, path: str, info: dict) -> None:
-        # The operator may have picked another file while this ran.
-        if path != self._pdf_path:
+        # The operator may have picked another file, preset or format while
+        # this ran; the re-measure already queued will report the right one.
+        if (path != self._pdf_path
+                or info.get("quality") != self.quality_combo.currentData()
+                or info.get("compact", False) != self._compact()):
             return
 
         times = info["estimates"]
@@ -440,20 +469,28 @@ class MainWindow(QMainWindow):
     def do_compress(self) -> None:
         if not self._pdf_path:
             return
-        default = os.path.splitext(self._pdf_path)[0] + ".psdi"
+        compact = self._compact()
+        extension = psdi.COMPACT_EXTENSION if compact else psdi.EXTENSION
+        default = os.path.splitext(self._pdf_path)[0] + extension
+        file_filter = ("Archives compactes (*.psdz)" if compact
+                       else "Archives PSDI (*.psdi)")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Enregistrer l'archive", default, "Archives PSDI (*.psdi)"
+            self, "Enregistrer l'archive", default, file_filter
         )
         if not path:
             return
+        # The extension tells the receiving operator which software reads the
+        # file; it must match the format whatever name was typed.
+        if not path.lower().endswith(extension):
+            path = os.path.splitext(path)[0] + extension
 
         self._set_busy(True)
-        self.log(f"Compression en qualité « {self.quality_combo.currentData()} »…",
-                 "info")
+        self.log(f"Compression en qualité « {self.quality_combo.currentData()} », "
+                 f"format {extension}…", "info")
 
         self._worker = CompressWorker(
             self._pdf_path, self.quality_combo.currentData(), path,
-            self.skip_images.isChecked(),
+            self.skip_images.isChecked(), compact,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_compress_done)
@@ -507,6 +544,10 @@ class MainWindow(QMainWindow):
             f"{_decimal_seconds(info['compression_time'])} s",
             "success",
         )
+        if info.get("compact"):
+            self.log("Archive compacte .psdz : la station qui la reçoit doit "
+                     "utiliser PDF Teleporter 2.5.0 ou plus ; la version F1GBD "
+                     "ne l'ouvre pas.", "warning")
         self.log(
             f"Sur l'air — Packet 1200 : {format_duration(times[MODE_PACKET_1200])} · "
             f"VARA HF: {format_duration(times[MODE_VARA_HF])} · "
@@ -651,7 +692,7 @@ class MainWindow(QMainWindow):
         # Route by extension: the two panels take different files, and making
         # the operator aim at the right half of the window would defeat the
         # convenience entirely.
-        if path.lower().endswith(".psdi"):
+        if path.lower().endswith(psdi.ARCHIVE_EXTENSIONS):
             self.load_psdi(path)
         else:
             self.load_pdf(path)
@@ -675,7 +716,7 @@ class MainWindow(QMainWindow):
         path = paths[0]
         if not os.path.isfile(path):
             return None
-        accepted = (".pdf", ".psdi") + engine.IMAGE_EXTENSIONS
+        accepted = (".pdf",) + psdi.ARCHIVE_EXTENSIONS + engine.IMAGE_EXTENSIONS
         return path if path.lower().endswith(accepted) else None
 
     def closeEvent(self, event) -> None:
@@ -719,8 +760,9 @@ def about_text() -> str:
         "Compresse des documents PDF en archives .psdi pour les "
         "transmettre sur des liaisons radio à bande étroite, et les "
         "recompose à la réception.<br><br>"
-        "Les archives sont interopérables avec les autres "
-        "implémentations du format .psdi.<br><br>"
+        "Les archives .psdi sont interopérables avec les autres "
+        "implémentations du format .psdi. Les archives compactes .psdz, plus "
+        "légères, ne sont lues que par PDF Teleporter 2.5.0 et plus.<br><br>"
         f"{html.escape(__copyright__)}.<br>"
         "D'après PDF Teleporter et le format .psdi de "
         f"{html.escape(__original_author__)}.<br><br>"

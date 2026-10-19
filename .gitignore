@@ -1,0 +1,9 @@
+# Python bytecode caches. The bytecode in reference/disasm/ is reference
+# material, not a cache: it lives outside any __pycache__ and stays tracked.
+__pycache__/
+
+# Outputs of application/build.cmd
+application/.venv-build/
+application/dist/
+application/build/PDFteleporter/
+application/build/tests.log

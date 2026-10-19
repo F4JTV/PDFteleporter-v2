@@ -1,3 +1,5 @@
+# Copyright (C) 2026 The PDF Teleporter contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Semantic comparison of two CPython 3.13 .pyc files.
 
 Compares instruction streams (opname + resolved argument, docstrings and

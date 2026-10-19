@@ -14,20 +14,24 @@ reference/       sources récupérés de l'implémentation originale, 1.0.6 et 2
 Cette application est dérivée du travail de **F1GBD (ADRASEC 77 – FNRASEC)**,
 auteur du PDFteleporter original et du format `.psdi`, distribué sous GNU GPL v3.
 Voir `application/README.md` pour l'attribution détaillée et la liste des
-changements.
+changements. Le format `.psdi` est conservé à l'identique ; la version 2.5.0
+ajoute, au choix de l'opérateur, une archive compacte `.psdz` que seule cette
+application lit.
 
 ## application/
 
 ```
-psditool/format.py          conteneur .psdi, disposition binaire
+psditool/format.py          conteneurs .psdi et .psdz, disposition binaire
 psditool/engine.py          compression et recomposition, deux modes
 psditool/presets.py         préréglages de qualité, estimations de transfert
 psditool/cli.py             CLI headless, aussi le point d'entrée du menu contextuel
 psditool/shell_windows.py   intégration Explorateur (registre)
 psditool/resources.py       résolution des ressources embarquées
 psditool/gui/               interface PyQt6, style Fusion
-tests/                      178 tests : conteneur, moteur, interopérabilité
+tests/                      243 tests : conteneur, format compact, moteur,
+                            interopérabilité, menu contextuel, mentions
 tests/vectors/golden.json   empreintes des archives de référence
+tests/vectors/*.psdz        archive compacte conservée, garde du décodeur
 pdfteleporter.py            point d'entrée unique : IHM / menu contextuel / CLI
 pdfteleporter.spec          PyInstaller, deux exécutables depuis une analyse
 build/version_info*.txt     ressources de version Windows
