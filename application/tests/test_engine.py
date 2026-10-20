@@ -1292,6 +1292,323 @@ class TestColumnPositions(unittest.TestCase):
         self.assertEqual(len(runs), 1, "prose should not be split")
 
 
+class TestWordSpaces(unittest.TestCase):
+    """Spaces between words survive, and none is invented.
+
+    LaTeX places every word by moving the cursor and types no space at all;
+    MuPDF guesses each one and hands it over as a span of its own. Those
+    spans used to be dropped with every other blank one, and the rebuild of
+    the FreeDV manual read "FreeDVisofficiallysupported".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.latex = fixtures.cursor_spaced(os.path.join(cls._tmp.name, "latex.pdf"))
+        cls.typed = fixtures.typed_spaces_with_noise(os.path.join(cls._tmp.name, "typed.pdf"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def _words(pdf_bytes: bytes) -> list[str]:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            return [w[4] for page in doc for w in page.get_text("words")]
+        finally:
+            doc.close()
+
+    def _rebuilt_words(self, path: str, quality: str) -> list[str]:
+        archive, _ = engine.pdf_to_archive(path, quality=quality)
+        return self._words(engine.archive_to_pdf(archive)[0])
+
+    def test_words_placed_by_cursor_moves_keep_their_spaces(self):
+        with open(self.latex, "rb") as handle:
+            original = sorted(self._words(handle.read()))
+        for quality in QUALITY_ORDER:
+            with self.subTest(quality=quality):
+                self.assertEqual(sorted(self._rebuilt_words(self.latex, quality)), original)
+
+    def test_no_space_is_added_where_words_sit_a_column_apart(self):
+        # The bullet and the table cells are drawn as runs of their own; a
+        # trailing space would only widen them.
+        archive, _ = engine.pdf_to_archive(self.latex, quality="medium")
+        manifest = psdi.read_struct(archive).manifest
+        texts = [span["t"] for block in manifest["pages"][0]["tb"]
+                 for line in block["l"] for span in line["s"]]
+        bullet = texts[texts.index("Windows: Windows 10") - 1]
+        self.assertFalse(bullet.endswith(" "), repr(bullet))
+        for value in ("128847", "119323"):
+            self.assertIn(value, texts)
+        self.assertIn("Le ", texts)  # a bold word follows in the same run
+
+    def test_a_typed_space_in_a_span_of_its_own_is_kept(self):
+        self.assertIn("émergentes", self._rebuilt_words(self.typed, "medium"))
+        self.assertIn("maladies", self._rebuilt_words(self.typed, "medium"))
+
+    def test_guessed_spaces_are_not_trusted_where_spaces_are_typed(self):
+        # Inside a word set glyph by glyph, MuPDF's guesses are noise; on a
+        # page that types its spaces they must not split it further.
+        words = self._rebuilt_words(self.typed, "medium")
+        self.assertNotIn("si", words)
+        self.assertNotIn("ni", words)
+
+    def test_the_trust_rule_reads_the_page(self):
+        def page_raw(path):
+            doc = fitz.open(path)
+            try:
+                return doc[0].get_text("rawdict")
+            finally:
+                doc.close()
+
+        self.assertTrue(engine._trusts_guessed_spaces(page_raw(self.latex)))
+        self.assertFalse(engine._trusts_guessed_spaces(page_raw(self.typed)))
+        self.assertFalse(engine._trusts_guessed_spaces({"blocks": []}))
+
+
+def _raw_line(*spans) -> dict:
+    """A rawdict of one horizontal line, from (font, size, chars) spans.
+
+    Each char is (c, x, width in em) or (c, x, width, synthetic), all on one
+    baseline; boxes are advance boxes, as MuPDF makes them.
+    """
+    made = []
+    for font, size, chars in spans:
+        out = []
+        for entry in chars:
+            c, x, width = entry[:3]
+            out.append({"c": c, "origin": (x, 100.0),
+                        "bbox": (x, 100.0 - size, x + width * size, 100.0 + 0.2 * size),
+                        "synthetic": entry[3] if len(entry) > 3 else False})
+        made.append({"font": font, "size": size, "color": 0, "flags": 0, "chars": out})
+    return {"blocks": [{"type": 0, "lines": [{"dir": (1.0, 0.0), "wmode": 0, "spans": made}]}]}
+
+
+def _at_pitch(text: str, pitch: float, widths, x: float = 50.0, size: float = 10.0) -> list:
+    """Chars of `text` one `pitch` em apart, each as wide as `widths` says.
+
+    A space is guessed the way MuPDF does wherever a glyph ends 0.15 em or
+    more before the next one starts.
+    """
+    chars = []
+    for index, c in enumerate(text):
+        width = widths(c)
+        chars.append((c, x, width))
+        gap = pitch - width
+        if c != " " and index + 1 < len(text) and text[index + 1] != " " and gap >= 0.15:
+            chars.append((" ", x + width * size, gap, True))
+        x += pitch * size
+    return chars
+
+
+_HELVETICA = []
+
+
+def _helvetica(c: str) -> float:
+    """The advance of `c` in Helvetica, in em."""
+    if not _HELVETICA:
+        _HELVETICA.append(fitz.Font("helv"))
+    return _HELVETICA[0].glyph_advance(ord(c))
+
+
+class TestFixedPitch(unittest.TestCase):
+    """Letters advancing by a fixed step are read by the step, not the gap.
+
+    The LibreOffice situation sheet came out of Microsoft Print to PDF with
+    its cells laid out in a monospaced pitch but drawn in DejaVu Sans. MuPDF
+    found a space behind every narrow letter, and the rebuild read "Nbr e de
+    pl aces r est ant es".
+    """
+
+    LINES = ["Nombre de personnes sinistrées", "Nbre de places restantes",
+             "Activation du plan communal", "Nombre de demande de renfort",
+             "Trafic routier perturbé"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.cells = fixtures.fixed_pitch_cells(os.path.join(cls._tmp.name, "cells.pdf"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_the_fixture_reproduces_the_sheet(self):
+        doc = fitz.open(self.cells)
+        try:
+            text = doc[0].get_text("text")
+        finally:
+            doc.close()
+        self.assertIn("Nbr e de pl aces r est ant es", text)
+
+    def test_cells_read_as_typed(self):
+        for quality in QUALITY_ORDER:
+            with self.subTest(quality=quality):
+                archive, _ = engine.pdf_to_archive(self.cells, quality=quality)
+                manifest = psdi.read_struct(archive).manifest
+                lines = [" ".join(span["t"] for span in line["s"])
+                         for block in manifest["pages"][0]["tb"] for line in block["l"]]
+                self.assertEqual(lines, self.LINES)
+                rebuilt = fitz.open(stream=engine.archive_to_pdf(archive)[0], filetype="pdf")
+                try:
+                    words = [engine._normalize_text(w[4]) for w in rebuilt[0].get_text("words")]
+                finally:
+                    rebuilt.close()
+                self.assertEqual(words, " ".join(self.LINES).split())
+
+    def test_a_blank_step_joins_two_words_into_one_run(self):
+        # The original decoder concatenates the spans of a line: two runs
+        # would reach it as "demandede".
+        archive, _ = engine.pdf_to_archive(self.cells, quality="medium")
+        line = psdi.read_struct(archive).manifest["pages"][0]["tb"][0]["l"][3]
+        self.assertEqual([span["t"] for span in line["s"]], ["Nombre de demande de renfort"])
+
+    def test_only_proportional_letters_at_one_step_qualify(self):
+        text = "Nombre de personnes sinistrees Nbre de places restantes"
+        sheet = _raw_line(("Sheet", 10.0, _at_pitch(text, 0.6, _helvetica)))
+        self.assertEqual(set(engine._fixed_pitch_fonts(sheet)), {("Sheet", 10.0)})
+        self.assertAlmostEqual(engine._fixed_pitch_fonts(sheet)[("Sheet", 10.0)], 0.6)
+        def proportional(words):
+            x, chars = 50.0, []
+            for c in words:
+                chars.append((c, x, _helvetica(c)))
+                x += _helvetica(c) * 10
+            return chars
+
+        cases = {
+            # Letters as wide as the step leave no gap to misread.
+            "monospaced": [_at_pitch(text, 0.6, lambda c: 0.6)],
+            # Two letters of very different widths sharing a step by chance.
+            "two letters": [_at_pitch("mi" * 20, 0.6, _helvetica)],
+            # Too little text to judge, though of many letters.
+            "short": [_at_pitch("Nombre de places", 0.6, _helvetica)],
+            # Letters advancing by their own widths.
+            "proportional": [proportional(text)],
+            # One font set both ways: its proportional lines would lose
+            # their spaces too, so the pitch must hold for most of it.
+            "mixed": [_at_pitch("Nombre de personnes sinistrees", 0.6, _helvetica),
+                      proportional("restantes evacuees")],
+        }
+        for name, lines in cases.items():
+            with self.subTest(case=name):
+                raw = {"blocks": [_raw_line(("F", 10.0, chars))["blocks"][0] for chars in lines]}
+                self.assertEqual(engine._fixed_pitch_fonts(raw), {})
+
+    def test_the_step_decides_each_guessed_space(self):
+        # A 6 pt step. "Nbre" with a space guessed behind its "r"; "de" one
+        # blank step further, its space handed over in a span of its own, as
+        # MuPDF does past 0.3 em; "places" two blank steps on, which may be
+        # another cell.
+        def guessed(after, until):
+            end = after[1] + after[2] * 10
+            return [(" ", end, (until - end) / 10, True)]
+
+        nbre = _at_pitch("Nbre", 0.6, _helvetica, x=50.0)
+        de = _at_pitch("de", 0.6, _helvetica, x=80.0)
+        places = _at_pitch("places", 0.6, _helvetica, x=104.0)
+        raw = _raw_line(("Sheet", 10.0, nbre), ("Sheet", 10.0, guessed(nbre[-1], 80.0)),
+                        ("Sheet", 10.0, de), ("Sheet", 10.0, guessed(de[-1], 104.0)),
+                        ("Sheet", 10.0, places))
+        # More of the sheet, for the font to be judged on.
+        filler = _at_pitch("restantes sinistrees personnes", 0.6, _helvetica)
+        raw["blocks"].append(_raw_line(("Sheet", 10.0, filler))["blocks"][0])
+        engine._settle_fixed_pitch(raw)
+        spans = raw["blocks"][0]["lines"][0]["spans"]
+        texts = ["".join(c["c"] for c in span["chars"]) for span in spans]
+        self.assertEqual(texts, ["Nbre de", " ", "places"])
+        self.assertFalse(any(c.get("synthetic") for span in spans for c in span["chars"]))
+
+    def test_a_ligature_takes_the_steps_of_its_letters(self):
+        text = "Trafic routier perturbe sinistrees personnes"
+        chars = _at_pitch(text.replace("fi", "ﬁ"), 0.6, _helvetica)
+        # Move everything after the ligature one step on: it stands for two.
+        at = next(i for i, c in enumerate(chars) if c[0] == "ﬁ")
+        chars = chars[:at + 1] + [(c[0], c[1] + 6.0, *c[2:]) for c in chars[at + 1:]]
+        raw = _raw_line(("Sheet", 10.0, chars))
+        ligature = raw["blocks"][0]["lines"][0]["spans"][0]["chars"][at]
+        before = ligature["bbox"]
+        engine._settle_fixed_pitch(raw)
+        self.assertAlmostEqual(ligature["bbox"][2] - before[2], 6.0)
+        runs = engine._split_span_runs(raw["blocks"][0]["lines"][0]["spans"][0])
+        self.assertEqual(runs[0][0].split()[0], "Traﬁc")
+
+
+class TestOverlookedSpaces(unittest.TestCase):
+    """The spaces MuPDF declines to guess after ligatures and symbols.
+
+    MuPDF only guesses a space after Latin-to-Arabic letters, punctuation and
+    currency signs. On pages set by LaTeX, whose spaces are all guesses, the
+    codec2 specification read "trade offwith" and the mathematics "x ∈X".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.latex = fixtures.overlooked_spaces(os.path.join(cls._tmp.name, "latex.pdf"))
+        cls.typed = fixtures.typed_spaces_with_noise(os.path.join(cls._tmp.name, "typed.pdf"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_the_fixture_reproduces_the_defect(self):
+        doc = fitz.open(self.latex)
+        try:
+            words = [w[4] for w in doc[0].get_text("words")]
+        finally:
+            doc.close()
+        self.assertIn("déﬁest", words)
+        self.assertIn("∈X", words)
+
+    def test_spaces_are_supplied_after_a_ligature_and_symbols(self):
+        for quality in QUALITY_ORDER:
+            with self.subTest(quality=quality):
+                archive, _ = engine.pdf_to_archive(self.latex, quality=quality)
+                manifest = psdi.read_struct(archive).manifest
+                lines = ["".join(span["t"] for span in line["s"])
+                         for block in manifest["pages"][0]["tb"] for line in block["l"]]
+                self.assertEqual(lines, ["Le défi est relevé.", "Soit x ∈ X et a − b = −1."])
+
+    def test_mupdf_s_rule_is_followed_where_it_holds(self):
+        for char in ("ﬁ", "ﬀ", "∈", "→", "−", "⌉", "", "ạ", "𝑥"):
+            with self.subTest(char=char):
+                self.assertTrue(engine._space_overlooked_after(char))
+        # Already guessed by MuPDF, or written without spaces between words.
+        for char in ("a", "é", "-", ",", "€", "中", "の", "ก", "", "ab"):
+            with self.subTest(char=char):
+                self.assertFalse(engine._space_overlooked_after(char))
+
+    def test_at_mupdf_s_distance(self):
+        def pair(gap):
+            raw = _raw_line(("F", 10.0, [("ﬁ", 50.0, 0.5), ("x", 55.0 + gap * 10, 0.5)]))
+            engine._add_overlooked_spaces(raw)
+            return "".join(c["c"] for c in raw["blocks"][0]["lines"][0]["spans"][0]["chars"])
+
+        self.assertEqual(pair(0.14), "ﬁx")
+        self.assertEqual(pair(0.16), "ﬁ x")
+
+    def test_between_spans_the_space_gets_a_span_of_its_own(self):
+        raw = _raw_line(("Symbol", 10.0, [("∈", 50.0, 0.713)]),
+                        ("Helvetica", 10.0, [("X", 57.13 + 2.78, 0.667)]))
+        engine._add_overlooked_spaces(raw)
+        spans = raw["blocks"][0]["lines"][0]["spans"]
+        self.assertEqual(["".join(c["c"] for c in s["chars"]) for s in spans], ["∈", " ", "X"])
+        self.assertTrue(spans[1]["chars"][0]["synthetic"])
+
+    def test_only_where_the_page_s_spaces_are_guesses(self):
+        from unittest import mock
+
+        for path, expected in ((self.latex, True), (self.typed, False)):
+            with self.subTest(page=os.path.basename(path)):
+                doc = fitz.open(path)
+                try:
+                    with mock.patch.object(engine, "_add_overlooked_spaces") as supply:
+                        engine._extract_page(doc[0], 0, {})
+                finally:
+                    doc.close()
+                self.assertEqual(supply.called, expected)
+
 
 class TestMissingToUnicode(unittest.TestCase):
     """Text in a font without a ToUnicode table must be rasterised, not guessed.

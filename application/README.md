@@ -45,9 +45,10 @@ sur la spécification d'origine.
 
 La version 2.5.0 ajoute un second format, `.psdz`, que le décodeur de F1GBD ne
 sait pas lire. Il ne sert qu'entre stations équipées de cette version ou d'une
-suivante et n'est produit que sur demande explicite ; un `.psdi` émis par la
-2.5.0 est identique octet pour octet à celui de la 2.4.1 (voir « Archives
-compactes `.psdz` »).
+suivante et n'est produit que sur demande explicite (voir « Archives compactes
+`.psdz` »). Le `.psdi` de la 2.5.0 ne diffère de celui de la 2.4.1 que par les
+espaces rétablies entre les mots (voir « Correctifs »), et reste lisible tel
+quel par la version de F1GBD.
 
 Cette compatibilité est vérifiée contre le vrai moteur de F1GBD, pas contre
 l'idée qu'on s'en fait : `reference/tools/bench.py` charge `psdi_lib` 2.1.0
@@ -370,9 +371,9 @@ préréglage `high` sur un document de photographies — les deux moteurs se
 valent, ce qui est attendu : les paramètres JPEG sont ceux du format. Depuis la
 2.4.0, aucune ligne n'est plus lourde que l'original, y compris celle des
 bordures à `medium`, qui porte pourtant les traits du tableau LibreOffice que
-l'original ne stocke pas du tout (voir la 2.3.0 et la 2.4.0). La 2.5.0 émet
-les mêmes `.psdi` octet pour octet ; l'archive compacte `.psdz` est mesurée à
-part, plus bas.
+l'original ne stocke pas du tout (voir la 2.3.0 et la 2.4.0). Sur ces
+documents, la 2.5.0 émet les mêmes `.psdi` octet pour octet ; l'archive
+compacte `.psdz` est mesurée à part, plus bas.
 
 Le détail de chaque changement, mesuré isolément, suit. Les pourcentages de ce
 tableau-ci sont des avant/après sur notre propre moteur, pas des écarts à
@@ -800,22 +801,22 @@ documents réels des sections précédentes, tailles en octets :
 
 | Document | Préréglage | F1GBD 2.1.0 | `.psdi` | `.psdz` | `.psdz` / `.psdi` | `.psdz` / F1GBD |
 |---|---|---|---|---|---|---|
-| SITREP OMS | `ultra_low` | 64 301 | 44 091 | 28 366 | −36 % | −56 % |
-| SITREP OMS | `low` | 93 884 | 65 643 | 40 630 | −38 % | −57 % |
-| SITREP OMS | `medium` | 124 656 | 102 071 | 60 994 | −40 % | −51 % |
-| SITREP OMS | `high` | 166 411 | 140 703 | 80 950 | −42 % | −51 % |
-| Point de situation LibreOffice | `ultra_low`, `low` | 11 556 | 10 105 | 6 176 | −39 % | −47 % |
-| Point de situation LibreOffice | `medium`, `high` | 11 556 | 10 879 | 6 974 | −36 % | −40 % |
+| SITREP OMS | `ultra_low` | 64 301 | 44 178 | 28 650 | −35 % | −55 % |
+| SITREP OMS | `low` | 93 884 | 65 726 | 41 106 | −37 % | −56 % |
+| SITREP OMS | `medium` | 124 656 | 102 216 | 61 512 | −40 % | −51 % |
+| SITREP OMS | `high` | 166 411 | 140 849 | 81 358 | −42 % | −51 % |
+| Point de situation LibreOffice | `ultra_low`, `low` | 11 556 | 9 764 | 5 966 | −39 % | −48 % |
+| Point de situation LibreOffice | `medium`, `high` | 11 556 | 10 539 | 6 725 | −36 % | −42 % |
 | Point de situation Excel | `ultra_low`, `low` | 24 592 | 11 506 | 6 230 | −46 % | −75 % |
 | Point de situation Excel | `medium`, `high` | 24 592 | 10 979 | 6 213 | −43 % | −75 % |
-| Bilan préfectoral | `ultra_low` | 15 719 | 7 822 | 6 194 | −21 % | −61 % |
-| Bilan préfectoral | `low` | 21 012 | 8 372 | 6 587 | −21 % | −69 % |
-| Bilan préfectoral | `medium` | 25 137 | 10 268 | 8 099 | −21 % | −68 % |
-| Bilan préfectoral | `high` | 26 442 | 10 832 | 8 589 | −21 % | −68 % |
+| Bilan préfectoral | `ultra_low` | 15 719 | 7 828 | 6 286 | −20 % | −60 % |
+| Bilan préfectoral | `low` | 21 012 | 8 378 | 6 682 | −20 % | −68 % |
+| Bilan préfectoral | `medium` | 25 137 | 10 280 | 8 212 | −20 % | −67 % |
+| Bilan préfectoral | `high` | 26 442 | 10 844 | 8 737 | −19 % | −67 % |
 
-Sur les seize archives : 476 740 → 291 595 octets (−39 %), contre 682 154 pour
+Sur les seize archives : 475 875 → 292 811 octets (−38 %), contre 682 154 pour
 `psdi_lib` 2.1.0 (−57 %). Le SITREP à « Moyenne » passe de 8 min 06 s à
-4 min 50 s en VARA HF selon l'estimation de l'application. Chacune des seize
+4 min 52 s en VARA HF selon l'estimation de l'application. Chacune des seize
 archives compactes se recompose avec exactement les mêmes mots que son `.psdi`.
 
 **Seulement sur demande.** Le décodeur de F1GBD ne lit pas ce format. Il le
@@ -825,8 +826,8 @@ devra redemander le document. D'où les garde-fous : la case « Compatible avec 
 version F1GBD (archive .psdi) » est cochée à chaque démarrage, le menu
 contextuel a une entrée par format, le CLI une option `--compact`, et
 l'extension annonce le format avant l'envoi. Le décodeur, lui, se fie au numéro
-de version inscrit dans le fichier, pas à l'extension. Le `.psdi` n'a pas bougé
-d'un octet : les vecteurs de référence de la 2.4.1 passent tels quels.
+de version inscrit dans le fichier, pas à l'extension. Le format `.psdi` n'a
+pas changé : les vecteurs de référence de la 2.4.1 passent tels quels.
 
 **Le manifeste en colonnes** (version 3 du conteneur). Le contenu est celui du
 manifeste JSON, rangé autrement : les boîtes de toutes les lignes ensemble,
@@ -838,28 +839,45 @@ sont des entiers de longueur variable, en unités de la précision du prérégla
 et LZMA compresse ensuite l'ensemble comme avant. Décodé, ce corps redonne
 exactement le manifeste JSON de la version 1 : l'encodeur le vérifie avant
 d'écrire, et un manifeste que les colonnes ne sauraient pas décrire part en
-JSON dans le corps compact plutôt que d'être approché. Le manifeste compressé
-perd de 20 % (bilan préfectoral) à 46 % (Excel).
+JSON dans le corps compact plutôt que d'être approché. Le JSON est aussi gardé
+quand il est le plus court, ce qui n'arrive que sur une page presque vide : sur
+le banc décrit plus bas, aucun `.psdz` ne dépasse le `.psdi` du même document
+de plus d'un octet. Le
+manifeste compressé perd de 20 % (bilan préfectoral) à 46 % (Excel).
 
 **Les photographies en AVIF, à fidélité au moins égale.** L'AVIF, issu du
 codec vidéo AV1, rend une image comparable à celle d'un JPEG en bien moins
 d'octets — encore faut-il vérifier « comparable ». Pour chaque photographie,
 l'encodeur produit d'abord le JPEG que le `.psdi` aurait stocké et mesure sa
-fidélité à l'image source par deux mesures, le PSNR et le SSIM. Il cherche
+fidélité à l'image source par deux mesures, le PSNR et le SSIM standard
+(fenêtre glissante de 7 pixels, celle de scikit-image). Il cherche
 ensuite par dichotomie la qualité AVIF la plus basse qui égale ou dépasse ce
 JPEG **sur les deux**. Le WebP est essayé aussi sur les petites images, où
 l'AVIF a peu de prise, et le plus petit des candidats qui passent l'emporte, le
 JPEG compris : une image où rien ne gagne reste un JPEG. Une illustration
 stockée en PNG passe en WebP sans perte, aux mêmes pixels. Les images perdent
-39 à 45 % sur le SITREP selon le préréglage, 17 à 26 % sur les deux petites
+38 à 44 % sur le SITREP selon le préréglage, 13 à 21 % sur les deux petites
 illustrations du bilan préfectoral.
 
 Le double critère n'est pas une précaution de principe. Avec le PSNR seul, la
 recherche retenait sur quatre images un AVIF plus lisse, au PSNR au moins égal
-mais au SSIM inférieur — moins net à l'œil. Le résultat final a été recontrôlé
-indépendamment, avec le SSIM de référence de scikit-image, sur 116 images —
-photographies, illustrations et pages entières de sept documents aux quatre
-préréglages : 114 recodées, aucune moins fidèle que l'image qu'elle remplace.
+mais au SSIM inférieur — moins net à l'œil.
+
+**Banc d'essai sur 51 PDF.** Le format a été passé sur 51 documents réels : les
+19 documents de Direwolf, le manuel de FreeDV, la documentation de codec2, des
+scans, des documents LaTeX, Google Docs, LibreOffice, des formulaires, des
+images CMJN et les quatre documents ci-dessus, aux quatre préréglages, soit
+204 archives et 749 pages. Le texte recomposé depuis le `.psdz` est identique
+mot pour mot à celui du `.psdi` dans les 204 cas ; aucun pixel ne diffère en
+dehors des images, et 2 570 pages sur 2 996 sont identiques au pixel près. Les
+4 118 images recodées ont été remesurées avec scikit-image contre les pixels
+mêmes que le JPEG codait : aucune n'est moins fidèle. Le banc a d'abord servi à
+corriger l'encodeur. Sa première version estimait le SSIM sur des fenêtres
+disjointes, plus vite ; sur les images petites ou minces, cette estimation
+laissait passer des encodages très légèrement en dessous du JPEG — 29 images
+dès les premiers documents passés, au pire −0,009 de SSIM. Il calcule désormais le SSIM exact, identique à celui
+de scikit-image à 10⁻⁷ près. Sur l'ensemble du banc, le `.psdz` pèse 28 % de
+moins que le `.psdi`.
 
 **Les pages en image** (version 4 du conteneur) — scans, pages pivotées —
 reçoivent la même recherche, page par page : −60 à −69 % sur le document pivoté
@@ -868,10 +886,20 @@ de la suite de tests.
 **Ce que cela coûte.**
 
 - *Le temps de compression.* Chercher la qualité AVIF code chaque photographie
-  plusieurs fois : le SITREP se compresse en 3,8 à 7,1 s au lieu de 1,0 à
-  1,5 s selon le préréglage. Les documents sans photographie restent sous la
-  seconde. L'estimation de taille de l'interface, qui compresse réellement,
-  prend le même temps.
+  plusieurs fois : le SITREP se compresse en 3,6 à 9,6 s au lieu d'environ
+  1 s selon le préréglage, le guide de Direwolf — 172 pages, 85 images — en
+  une demi-minute au lieu de 6 à 9 s. Les documents sans
+  photographie restent sous la seconde. L'estimation de taille de l'interface,
+  qui compresse réellement, prend le même temps.
+- *À l'écran, une image un peu plus lisse.* L'égalité de fidélité est garantie
+  à la résolution de l'archive. Affichée à une autre échelle, une image
+  recodée, plus lisse que le JPEG qu'elle remplace, ne le bat plus toujours :
+  le banc compare chaque image recomposée à l'original rendu à 100 dpi, et sur
+  les 519 zones où la recomposition reproduit l'original, le `.psdz` a un SSIM
+  au moins égal dans 83 % des cas et un PSNR au moins égal dans 76 % ; en
+  moyenne les deux sont meilleurs. Les écarts contraires restent sous 0,025 de
+  SSIM et 1,5 dB de PSNR, sans perte de lisibilité visible sur les
+  comparaisons côte à côte.
 - *Le poids du PDF recomposé.* MuPDF ne sait incorporer ni l'AVIF ni le WebP :
   le décodeur les décode avec Pillow et range les pixels sans perte. Le SITREP
   recomposé à « Moyenne » pèse 1,66 Mo au lieu de 593 ko — sans effet sur la
@@ -889,6 +917,8 @@ de la suite de tests.
 |---|---|---|
 | AVIF apparié au JPEG sur le seul PSNR | quatre images moins nettes (SSIM inférieur) | remplacé par le double critère |
 | JPEG XL | greffon tiers nécessaire pour Pillow, et MuPDF ne le lit pas non plus | écarté |
+| SSIM estimé sur des fenêtres disjointes, plus rapide | 29 images petites ou minces acceptées très légèrement sous le JPEG, selon le SSIM de référence | remplacé par le SSIM exact |
+| WebP sans perte à l'effort maximal (méthode 6) | environ 1,5 point de mieux sur les illustrations, 35 fois plus lent : une minute au lieu de 9 s sur une revue de 23 pages | effort 4 retenu |
 
 Au passage, un défaut ancien corrigé : depuis que la compression du PDF est un
 sous-menu en cascade (série 2.0), la détection du menu contextuel cherchait sous
@@ -899,6 +929,106 @@ commande du verbe de recomposition, qui en a une dans toutes les dispositions
 que cet outil a écrites.
 
 ### Correctifs
+
+**Espaces perdus entre les mots (2.5.0).** LaTeX ne tape aucune espace : il
+place chaque mot en déplaçant le curseur. MuPDF devine alors les espaces et
+donne à chacune un fragment à elle seule, que l'encodeur jetait avec tous les
+fragments vides — celui de F1GBD aussi. Les mots se recollaient : la
+recomposition du manuel de FreeDV se lisait « FreeDVisofficiallysupported… ».
+Le même défaut touchait, plus rarement, les documents Word où une espace tapée
+porte un autre style que ses voisines : « maladiesémergentes » dans le SITREP,
+« complètementindisponible » dans le bilan préfectoral.
+
+L'espace est maintenant rendue au mot qui la précède, là où les deux mots
+tombent dans la même boîte de texte à la recomposition ; au-delà, chacun est
+placé seul et une espace finale ne ferait que l'élargir. Une espace tapée est
+toujours rendue. Une espace devinée ne l'est que sur une page qui ne tape
+presque pas les siennes — moins d'une tapée pour dix devinées — et la règle
+n'est pas une précaution : un tableau LibreOffice imprimé en PDF place chaque
+glyphe à part, et MuPDF y devine des espaces au milieu de « sinistrées ». Sur
+les 51 documents du banc d'essai, la part des mots de l'original retrouvés à la
+recomposition passe de 74 % à 97 % : de 22 % à 100 % pour le manuel de FreeDV,
+de 28 % à 99,5 % pour la documentation de codec2, de 35 % à 97 % pour un
+ouvrage LaTeX de 117 pages. Les documents Word gagnent jusqu'à un point, le
+tableau LibreOffice ne bouge pas.
+
+Ces espaces sont de simples caractères dans le texte du manifeste : le
+décodeur de F1GBD les affiche comme les autres — `TestOriginalDecoder` le
+vérifie — et le format ne change pas. À « Moyenne », le `.psdi` est identique
+octet pour octet pour 36 des 51 documents ; pour les autres il varie de −1,7 %
+à +2,5 %, et de +10 % sur une page de 1 Ko. Les vecteurs de référence de la
+2.4.1 passent tels quels.
+
+**Espaces de trop, espaces oubliées : ce que MuPDF lit de travers (2.5.0).**
+Deux défauts restaient après ce correctif. Ils ne viennent pas de l'encodeur :
+MuPDF les commet déjà en lisant l'original.
+
+*Des lettres posées à pas fixe.* Le point de situation LibreOffice se
+recomposait en « Nbr e de places r est ant es en cent r es d’ héber gt ». Le
+PDF, imprimé par « Microsoft: Print To PDF », place chaque lettre de ces
+cellules au pas d'une police à chasse fixe, 0,6 em — la copie Excel du même
+tableau les compose en Courier New —, mais les dessine en DejaVu Sans, dont le
+« i » fait moins de la moitié de ce pas et le « m » davantage. Derrière chaque
+lettre étroite reste un vide, jusqu'à un tiers d'em, que MuPDF prend pour une
+espace ; l'original lui-même s'affiche lettres écartées.
+
+L'encodeur reconnaît maintenant une police posée à pas fixe quelle que soit la
+largeur de ses lettres : sur la page, la plupart des pas d'une lettre à la
+suivante sont égaux à 5 % près, et ce pas est pris par au moins huit lettres
+différentes dont les largeurs s'écartent d'au moins un tiers du pas. Un texte
+proportionnel avance de la largeur de chaque lettre et ne remplit pas la
+première condition ; une police à chasse fixe, dont chaque lettre a la largeur
+du pas, ne laisse aucun vide à mal lire ; quelques capitales de largeur voisine
+tombent parfois sur un même pas — « PQ », « AB » dans les pages de géométrie
+d'un ouvrage LaTeX du banc —, jamais huit lettres. Sur une telle police, c'est
+le pas qui tranche : deux lettres à un pas l'une de l'autre sont du même mot,
+et une espace prend un pas de plus, tapée ou laissée vide. Une ligature compte
+autant de pas que de lettres : « trafic », « affectés », « fluvial » ne sont
+plus coupés en deux. Deux mots séparés par un seul pas vide passent dans le
+même fragment, l'espace entre eux, sans quoi le décodeur de F1GBD, qui
+concatène les fragments d'une ligne, lisait « demandede ». 154 des 567 lignes
+du document sont corrigées, et son vocabulaire est désormais exactement celui
+de la copie Excel, aux valeurs des cellules près, qui diffèrent entre les deux
+fichiers.
+
+*Des espaces jamais devinées après une ligature ou un symbole.* MuPDF ne
+devine pas d'espace après un caractère qui n'est ni du latin de base, ni du
+grec, du cyrillique, de l'hébreu ou de l'arabe, ni une ponctuation générale, un
+exposant ou un symbole monétaire (`may_add_space` dans son `stext-device.c`).
+C'est voulu : le chinois, le japonais ou le thaï s'écrivent sans espaces. Mais
+la règle laisse de côté les ligatures latines, rangées dans un autre bloc
+Unicode — d'où « trade offwith » dans la documentation de codec2 —, et les
+symboles mathématiques : « x ∈X », « [0, 1] →X ». Sur une page dont toutes les
+espaces sont devinées, l'encodeur ajoute après ces caractères l'espace que
+MuPDF aurait devinée après une lettre, à la même distance, 0,15 em : après les
+ligatures latines, les lettres latines et grecques des blocs étendus, les
+flèches, les opérateurs et autres symboles techniques ou géométriques, les
+codes privés des polices de symboles et les alphabets mathématiques, jamais
+après une écriture sans espaces. Le banc en compte 1 997 dans l'ouvrage LaTeX
+de 117 pages, 63 dans codec2, 2 dans un article LaTeX, toutes après un symbole
+ou une ligature.
+
+La mesure du correctif précédent compte les mots que MuPDF lit dans
+l'original : elle tient ces lectures fautives pour justes, et compte comme
+perdus les mots une fois corrigés — avec elle, le banc redescend de 97 % à
+96 %, l'ouvrage de 117 pages de 97 % à 91 %. Mesurée contre une lecture juste,
+la part des mots retrouvés à la recomposition passe de 77 % à 100 % pour le
+point de situation, contre la copie Excel du même tableau, mots alphabétiques
+seulement puisque les valeurs des cellules diffèrent — par le décodeur de
+F1GBD aussi, qui partait de 76 %. Contre `pdftotext` (Poppler), qui place ces
+espaces, elle passe de 71,7 % à 81,7 % pour l'ouvrage de 117 pages, de 92,9 %
+à 93,7 % pour codec2 et de 98,15 % à 98,17 % pour l'article ; l'écart qui
+reste tient au découpage des formules — indices, délimiteurs, accents —, pas aux
+espaces entre les mots.
+
+Les 47 autres documents du banc donnent des archives identiques octet pour
+octet, comme les documents de `reference/` et les vecteurs de référence. Le
+point de situation LibreOffice perd 3 % dans les deux formats — moins
+d'espaces, moins de fragments —, les trois documents LaTeX varient de −0,05 %
+à +0,1 %, et sur l'ensemble du banc le `.psdz` reste 28 % plus léger que le
+`.psdi`. Le format ne change pas : ce ne sont que des caractères du texte. Deux
+documents de test reproduisent ces défauts, avec leurs vecteurs, et
+`TestOriginalDecoder` vérifie que le décodeur de F1GBD lit les mots corrigés.
 
 **Rotation ignorée en mode texte seul.** L'original désactive entièrement la
 détection automatique de mode dès que « texte seul » est coché
@@ -1005,14 +1135,14 @@ de 50 mégapixels.
 python -m unittest discover -s tests -t .
 ```
 
-243 tests, sans dépendance en plus de celles de l'application.
+264 tests, sans dépendance en plus de celles de l'application.
 
 | Fichier | Objet |
 |---|---|
 | `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles, dictionnaire LZMA, coordonnées à largeur fixe |
-| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, codage du texte, codec des images |
+| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, codage du texte, espaces entre les mots — y compris lettres à pas fixe et espaces après ligatures et symboles —, codec des images |
 | `tests/test_compact.py` | archives `.psdz` : manifeste en colonnes rendu à l'identique, repli JSON, corps abîmés, choix AVIF et WebP à fidélité au moins égale, pages en image, ligne de commande |
-| `tests/test_interop.py` | vecteurs de référence `.psdi` et `.psdz`, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, bordures, images, place des glyphes, refus des `.psdz`) |
+| `tests/test_interop.py` | vecteurs de référence `.psdi` et `.psdz`, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, espaces rétablies ou corrigées, bordures, images, place des glyphes, refus des `.psdz`) |
 | `tests/test_shell.py` | menu contextuel : forme des clés de registre, une cascade par format, commandes comprises par le CLI, détection et désinstallation |
 | `tests/test_notices.py` | en-têtes de copyright et SPDX, mentions de la fenêtre À propos et de `--version`, concordance des versions |
 

@@ -28,7 +28,7 @@ psditool/cli.py             CLI headless, aussi le point d'entrée du menu conte
 psditool/shell_windows.py   intégration Explorateur (registre)
 psditool/resources.py       résolution des ressources embarquées
 psditool/gui/               interface PyQt6, style Fusion
-tests/                      243 tests : conteneur, format compact, moteur,
+tests/                      264 tests : conteneur, format compact, moteur,
                             interopérabilité, menu contextuel, mentions
 tests/vectors/golden.json   empreintes des archives de référence
 tests/vectors/*.psdz        archive compacte conservée, garde du décodeur

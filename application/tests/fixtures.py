@@ -376,3 +376,178 @@ def graphics_report(path: str) -> str:
     doc.save(path, deflate=True)
     doc.close()
     return path
+
+
+def _set_words(page, y: float, words, x: float = 50, size: float = 10.0,
+               gap: float = 0.33) -> float:
+    """Place each word on its own, `gap` em after the last: no space typed."""
+    for word, face in words:
+        page.insert_text(fitz.Point(x, y), word, fontname=face, fontsize=size)
+        x += fitz.Font(face).text_length(word, fontsize=size) + gap * size
+    return x
+
+
+def cursor_spaced(path: str, seed: int = 5) -> str:
+    """Prose whose words are placed by cursor moves, the way LaTeX sets them.
+
+    The PDF holds no space character at all: MuPDF guesses every one of them
+    and hands each over as a span of its own. A bold word inside a sentence,
+    a bullet and a table row whose values sit a column apart cover the places
+    where the gap decides whether two words share a run.
+    """
+    rng = random.Random(seed)
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    _set_words(page, 70, [("System", "hebo"), ("Requirements", "hebo")], size=14)
+    y = 100
+    for _ in range(8):
+        _set_words(page, y, [(rng.choice(WORDS), "helv") for _ in range(8)])
+        y += 15
+    _set_words(page, y, [("Le", "helv"), ("relais", "hebo"), ("est", "helv"),
+                         ("actif", "helv")])
+    y += 15
+    # 0.6 em: MuPDF still guesses a space and keeps one line, but the
+    # decoders set the two sides as separate runs.
+    x = _set_words(page, y, [("·", "helv")], x=60, gap=0.6)
+    _set_words(page, y, [("Windows:", "helv"), ("Windows", "helv"), ("10", "helv")], x=x)
+    y += 15
+    _set_words(page, y, [("128847", "helv"), ("119323", "helv")], gap=0.6)
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
+
+
+def typed_spaces_with_noise(path: str) -> str:
+    """A page whose producer types its spaces, with two traps.
+
+    One word is set glyph by glyph at irregular intervals: MuPDF guesses
+    spaces inside it, which are noise. And one typed space sits in a span of
+    its own, in another style than the words around it: a real word
+    boundary. (The LibreOffice sheet's own noise comes from a fixed pitch;
+    see fixed_pitch_cells.)
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text(fitz.Point(50, 70), "Les communes sont toutes en vigilance "
+                     "rouge depuis hier soir.", fontname="helv", fontsize=10)
+    helv = fitz.Font("helv")
+    x = 50
+    for char, gap in zip("sinistrées", (0.09, 0.31, -0.03, 0.33, 0.07, 0.22, 0.18,
+                                        -0.02, 0.0, 0.0)):
+        page.insert_text(fitz.Point(x, 100), char, fontname="helv", fontsize=10)
+        x += helv.text_length(char, fontsize=10) + gap * 10
+    x = 50
+    for text, face in (("maladies", "helv"), (" ", "hebo"), ("émergentes", "helv")):
+        page.insert_text(fitz.Point(x, 130), text, fontname=face, fontsize=10)
+        x += fitz.Font(face).text_length(text, fontsize=10)
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
+
+
+def _raw_page(doc, fonts: dict, content: str, width: float = 595,
+              height: float = 842):
+    """A page drawn by a hand-written content stream.
+
+    insert_text sets whole strings in an encoding of its own choosing. The
+    producers the fixtures below stand in for move glyph by glyph inside one
+    TJ, and reach ligatures and symbols through their fonts' encodings.
+    """
+    page = doc.new_page(width=width, height=height)
+    refs = []
+    for name, definition in fonts.items():
+        xref = doc.get_new_xref()
+        doc.update_object(xref, definition)
+        refs.append(f"/{name} {xref} 0 R")
+    doc.xref_set_key(page.xref, "Resources", "<</Font<<" + "".join(refs) + ">>>>")
+    xref = doc.get_new_xref()
+    doc.update_object(xref, "<<>>")
+    doc.update_stream(xref, content.encode("latin-1"))
+    doc.xref_set_key(page.xref, "Contents", f"{xref} 0 R")
+    return page
+
+
+# Helvetica drawing the "fi" ligature at code 128, where WinAnsi has the euro.
+_FI = "\x80"
+_HELVETICA_FI = ("<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding"
+                 "<</Type/Encoding/BaseEncoding/WinAnsiEncoding"
+                 "/Differences[128/fi]>>>>")
+_SYMBOL = "<</Type/Font/Subtype/Type1/BaseFont/Symbol>>"
+
+
+def _pitch_tj(segments, pitch: float = 0.6) -> str:
+    """One TJ moving each glyph on by `pitch` em per letter it draws.
+
+    `segments` are (text, blank steps after it). The ligature takes two
+    steps, like the two letters it stands for.
+    """
+    helv = fitz.Font("helv")
+    parts = []
+    for text, blank in segments:
+        for index, char in enumerate(text):
+            steps = 2 if char == _FI else 1
+            if index == len(text) - 1:
+                steps += blank
+            width = helv.glyph_advance(0xFB01 if char == _FI else ord(char)) * 1000
+            parts += [f"<{ord(char):02X}>", f"{width - steps * pitch * 1000:.0f}"]
+    return "[" + "".join(parts[:-1]) + "] TJ"
+
+
+def fixed_pitch_cells(path: str) -> str:
+    """Cells laid out at a fixed pitch, drawn in a proportional font.
+
+    How the LibreOffice situation sheet came out of Microsoft Print to PDF:
+    its cells are laid out in the 0.6 em pitch of a monospaced font but drawn
+    in DejaVu Sans, one TJ per line moving each glyph on to the next step.
+    MuPDF finds a space behind every narrow letter: "Nbr e de pl aces r est
+    ant es". Words are separated by typed spaces, except on one line where a
+    blank step stands between "demande" and "de"; "Trafic" is drawn with the
+    "fi" ligature, which takes two steps.
+    """
+    doc = fitz.open()
+    lines = (
+        [("Nombre de personnes sinistrées", 0)],
+        [("Nbre de places restantes", 0)],
+        [("Activation du plan communal", 0)],
+        [("Nombre de demande", 1), ("de renfort", 0)],
+        [(f"Tra{_FI}c routier perturbé", 0)],
+    )
+    ops = [f"BT /F1 8 Tf 50 {780 - 12 * index} Td {_pitch_tj(line)} ET"
+           for index, line in enumerate(lines)]
+    _raw_page(doc, {"F1": _HELVETICA_FI}, "\n".join(ops))
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
+
+
+def overlooked_spaces(path: str) -> str:
+    """LaTeX-like prose with a ligature and symbols at word boundaries.
+
+    No space is typed: every word is placed by a cursor move and MuPDF
+    guesses the spaces, except after the "fi" ligature ending "défi" and
+    after the symbols, where its rule declines to guess any. The relations
+    stand a thick space from their neighbours and the binary minus a medium
+    one, as in LaTeX; the minus of "−1" is set against its digit, as a sign
+    is, and needs no space.
+    """
+    helv, symb = fitz.Font("helv"), fitz.Font("symb")
+    doc = fitz.open()
+    ops = []
+    x = 50
+    for word in ("Le", f"dé{_FI}", "est", "relevé."):
+        ops.append(f"BT /F1 10 Tf {x:.2f} 780 Td <{word.encode('latin-1').hex()}> Tj ET")
+        x += sum(helv.glyph_advance(0xFB01 if c == _FI else ord(c)) for c in word) * 10 + 3.3
+    x = 50
+    # (font, code, glyph, gap after in em)
+    for font, code, glyph, gap in (
+            ("F1", "Soit", "Soit", 0.33), ("F1", "x", "x", 0.278), ("F2", "\xce", "∈", 0.278),
+            ("F1", "X", "X", 0.33), ("F1", "et", "et", 0.33), ("F1", "a", "a", 0.222),
+            ("F2", "-", "−", 0.222), ("F1", "b", "b", 0.278), ("F1", "=", "=", 0.278),
+            ("F2", "-", "−", 0.0), ("F1", "1.", "1.", 0.0)):
+        ops.append(f"BT /{font} 10 Tf {x:.2f} 760 Td <{code.encode('latin-1').hex()}> Tj ET")
+        face = symb if font == "F2" else helv
+        x += sum(face.glyph_advance(ord(c)) for c in glyph) * 10 + gap * 10
+    _raw_page(doc, {"F1": _HELVETICA_FI, "F2": _SYMBOL}, "\n".join(ops))
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
