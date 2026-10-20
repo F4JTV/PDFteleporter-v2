@@ -156,7 +156,23 @@ class TestColumnarManifest(unittest.TestCase):
         self.assertEqual(scale(tenth), 10)
         self.assertEqual(scale(hundredth), 100)
         for manifest in (whole, tenth, hundredth):
-            self.assertEqual(psdi.compact_body_kind(self._round_trip(manifest)), "columns")
+            # Tested on the columns themselves: the writer may keep the JSON
+            # of a manifest this small (see the next test).
+            self.assertEqual(psdi._decode_columns(psdi._encode_columns(manifest)), manifest)
+            self._round_trip(manifest)
+
+    def test_the_smaller_body_is_kept(self):
+        # One rectangle: the columns' section table outweighs the JSON, and
+        # the compact archive must not come out larger than the classic one
+        # by more than its body-kind byte.
+        tiny = _manifest([{"pn": 1, "dr": [{"t": "rect", "r": [1, 2, 30, 40]}]}])
+        data = self._round_trip(tiny)
+        self.assertEqual(psdi.compact_body_kind(data), "json")
+        self.assertLessEqual(len(data), len(psdi.write_struct(tiny, {})) + 1)
+        # A real page keeps the columns, which are far smaller.
+        classic = psdi.read_struct(self.archives[("text_report", "medium")])
+        data = self._round_trip(classic.manifest, classic.images)
+        self.assertEqual(psdi.compact_body_kind(data), "columns")
 
     def test_what_the_columns_cannot_hold_goes_to_json_unchanged(self):
         cases = {
@@ -353,6 +369,48 @@ class TestSsim(unittest.TestCase):
         tiny = Image.new("L", (5, 5), 100)
         self.assertEqual(engine._ssim(tiny, tiny), 1.0)
         self.assertEqual(engine._ssim(tiny, Image.new("L", (5, 5), 101)), 0.0)
+
+    @staticmethod
+    def _textbook_ssim(reference, candidate):
+        """SSIM by the definition: every 7x7 window, sample statistics, floats."""
+        c1, c2, n = (0.01 * 255) ** 2, (0.03 * 255) ** 2, 49
+        width, height = reference.size
+        scores = []
+        for x_band, y_band in zip(reference.split(),
+                                  candidate.convert(reference.mode).split()):
+            xs_all, ys_all = list(x_band.getdata()), list(y_band.getdata())
+            total = count = 0
+            for top in range(height - 6):
+                for left in range(width - 6):
+                    xs = [xs_all[(top + j) * width + left + i] for j in range(7) for i in range(7)]
+                    ys = [ys_all[(top + j) * width + left + i] for j in range(7) for i in range(7)]
+                    mx, my = sum(xs) / n, sum(ys) / n
+                    vx = sum((v - mx) ** 2 for v in xs) / (n - 1)
+                    vy = sum((v - my) ** 2 for v in ys) / (n - 1)
+                    cov = sum((a - mx) * (b - my) for a, b in zip(xs, ys)) / (n - 1)
+                    total += (((2 * mx * my + c1) * (2 * cov + c2))
+                              / ((mx * mx + my * my + c1) * (vx + vy + c2)))
+                    count += 1
+            scores.append(total / count)
+        return sum(scores) / len(scores)
+
+    def test_matches_the_standard_definition(self):
+        # The measure is the encoder's promise, so it must be the standard
+        # one: an approximation over non-overlapping windows disagreed with
+        # it on small and thin images and let worse encodings through.
+        photo = Image.new("RGB", (23, 17))
+        draw = ImageDraw.Draw(photo)
+        for i in range(0, 23, 3):
+            draw.line([i, 0, 22 - i, 16], fill=(i * 11, 200 - i * 7, 90 + i * 5), width=1)
+        thin = photo.convert("L").resize((60, 9))
+        for reference in (photo, thin):
+            for quality in (5, 40):
+                candidate = _decoded(engine._image_bytes(reference, format="WEBP",
+                                                         quality=quality))
+                with self.subTest(size=reference.size, mode=reference.mode, quality=quality):
+                    self.assertAlmostEqual(engine._ssim(reference, candidate),
+                                           self._textbook_ssim(reference, candidate),
+                                           delta=1e-6)
 
 
 class TestCompactImages(unittest.TestCase):

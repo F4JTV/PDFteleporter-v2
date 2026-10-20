@@ -100,10 +100,11 @@ recomposer chaque archive par chaque décodeur : tailles, temps de compression e
 de recomposition, nombre de mots retrouvés et écart de rendu à l'original. Il
 écrit une ligne JSON par cas à l'écran et le tout dans
 `<dossier de sortie>/bench.json`. `bench/bench.json` est cette sortie pour
-psditool 2.4.0 ; la 2.4.1 et la 2.5.0 émettent les mêmes archives `.psdi` octet
-pour octet, ses tailles et ses recompositions valent donc aussi pour elles. Les
-archives compactes `.psdz` de la 2.5.0, que `psdi_lib` refuse par leur numéro
-de version, n'y figurent pas.
+psditool 2.4.0 ; sur ces documents, la 2.4.1 et la 2.5.0 émettent les mêmes
+archives `.psdi` octet pour octet — aucun n'a les espaces manquantes ou
+parasites que corrige la 2.5.0 —, ses tailles et ses recompositions valent donc
+aussi pour elles. Les archives compactes `.psdz` de la 2.5.0, que `psdi_lib`
+refuse par leur numéro de version, n'y figurent pas.
 
 Pour comparer deux bytecodes, docstrings et numéros de ligne ignorés :
 

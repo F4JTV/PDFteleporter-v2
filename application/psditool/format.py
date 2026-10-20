@@ -1012,6 +1012,10 @@ def _decode_columns(body: bytes) -> dict:
     return manifest
 
 
+# Compressed column bodies smaller than this are also compared with the JSON.
+_JSON_RETRY_BELOW = 4096
+
+
 def write_compact_struct(manifest: dict, images: dict[str, bytes],
                          lzma_preset: int = 6) -> bytes:
     """Serialise a version 3 archive.
@@ -1019,7 +1023,8 @@ def write_compact_struct(manifest: dict, images: dict[str, bytes],
     The columns are decoded again before they are trusted: if the result is
     not equal to the manifest -- a key the layout does not know, a value it
     would round -- the body falls back to the version 1 JSON, so nothing is
-    ever lost to the compact form.
+    ever lost to the compact form. The JSON is also kept when it is the
+    smaller, which only happens on near-empty documents.
     """
     columns = _encode_columns(manifest)
     if columns is not None:
@@ -1029,11 +1034,20 @@ def write_compact_struct(manifest: dict, images: dict[str, bytes],
             faithful = False
         if not faithful:
             columns = None
-    if columns is not None:
-        body = bytes([_BODY_COLUMNS]) + columns
+    json_body = bytes([_BODY_JSON]) + _manifest_json(manifest).encode("utf-8")
+    if columns is None:
+        body, compressed = json_body, _lzma_compress_text(json_body)
     else:
-        body = bytes([_BODY_JSON]) + _manifest_json(manifest).encode("utf-8")
-    compressed = _lzma_compress_text(body)
+        body = bytes([_BODY_COLUMNS]) + columns
+        compressed = _lzma_compress_text(body)
+        # On a page holding a dozen words the section table can cost more
+        # than the JSON it replaces; keep whichever is smaller. Beyond a few
+        # kilobytes the columns win by a fifth or more, and compressing the
+        # JSON as well would only cost time -- most of a second on a book.
+        if len(compressed) < _JSON_RETRY_BELOW:
+            alternative = _lzma_compress_text(json_body)
+            if len(alternative) < len(compressed):
+                body, compressed = json_body, alternative
 
     out = io.BytesIO()
     out.write(ARCHIVE_MAGIC)

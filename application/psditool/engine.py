@@ -31,6 +31,7 @@ import io
 import logging
 import math
 import os
+import statistics
 import time
 from collections.abc import Callable
 
@@ -709,9 +710,13 @@ _AVIF_SPEED = 6
 _AVIF_PAGE_SPEED = 7
 _AVIF_PAGE_PIXELS = 1_000_000
 _WEBP_LOSSY_MAX_PIXELS = 20_000
-# SSIM over non-overlapping 7x7 windows: the window of scikit-image's default
-# SSIM, without its one-pixel stride. Windows of 7 straddle JPEG's 8x8 blocks,
-# so its blocking is inside the measure rather than between windows.
+# SSIM as Wang et al. define it and scikit-image computes it by default: a 7x7
+# window slid one pixel at a time, sample (co)variances, windows that would
+# reach past the border left out. A first version took non-overlapping
+# windows, which was quicker; on small and thin images, which hold few of
+# them, that estimate disagreed with the standard measure often enough to let
+# some lossy WebP and AVIF through slightly below the JPEG's SSIM -- found by
+# re-measuring a corpus of real documents with scikit-image.
 _SSIM_WINDOW = 7
 _SSIM_C1 = (0.01 * 255) ** 2
 _SSIM_C2 = (0.03 * 255) ** 2
@@ -721,31 +726,67 @@ _SSIM_C2 = (0.03 * 255) ** 2
 _MAX_DECODED_PIXELS = 50_000_000
 
 
+def _add_shifted(a):
+    """ImageMath body: the sum of the operands s0, s1, ... in order."""
+    total = a["s0"]
+    for index in range(1, _SSIM_WINDOW):
+        total = total + a[f"s{index}"]
+    return total
+
+
+def _window_sums(img: Image.Image) -> Image.Image:
+    """The sum of every 7x7 window lying wholly inside `img`, a mode "I" image.
+
+    Separable: seven shifted copies added across, then seven down. Integer
+    arithmetic keeps the sums exact; the largest, 49 squared pixel values
+    multiplied by 49 again later, stays far below 2**31.
+    """
+    window = _SSIM_WINDOW
+    width, height = img.size
+    across = {f"s{i}": img.crop((i, 0, i + width - window + 1, height))
+              for i in range(window)}
+    rows = ImageMath.lambda_eval(_add_shifted, **across)
+    down = {f"s{i}": rows.crop((0, i, width - window + 1, i + height - window + 1))
+            for i in range(window)}
+    return ImageMath.lambda_eval(_add_shifted, **down)
+
+
 def _ssim(reference: Image.Image, candidate: Image.Image) -> float:
     """Mean SSIM of `candidate` against `reference`, all bands averaged.
 
-    Computed with Pillow's 32-bit float images -- box means by reduce(), the
-    rest by ImageMath -- so, like _psnr, it needs no numerical library.
+    The standard measure, computed with Pillow alone -- window sums in 32-bit
+    integers, the final ratio in 32-bit floats -- so, like _psnr, it needs no
+    numerical library. It agrees with scikit-image's
+    structural_similarity(data_range=255) to about 1e-7.
     """
     candidate = candidate.convert(reference.mode)
     if min(reference.size) < _SSIM_WINDOW:
         return 1.0 if ImageChops.difference(reference, candidate).getbbox() is None else 0.0
-    window = _SSIM_WINDOW
+    n = _SSIM_WINDOW * _SSIM_WINDOW
+    mean_scale = 1.0 / (n * n)      # (window sum / n) squared
+    var_scale = 1.0 / (n * (n - 1))  # sample (co)variance from window sums
     scores = []
     for x_band, y_band in zip(reference.split(), candidate.split()):
-        x = x_band.convert("F")
-        y = y_band.convert("F")
-        mean_x = x.reduce(window)
-        mean_y = y.reduce(window)
-        xx = ImageMath.lambda_eval(lambda a: a["x"] * a["x"], x=x).reduce(window)
-        yy = ImageMath.lambda_eval(lambda a: a["y"] * a["y"], y=y).reduce(window)
-        xy = ImageMath.lambda_eval(lambda a: a["x"] * a["y"], x=x, y=y).reduce(window)
+        x = x_band.convert("I")
+        y = y_band.convert("I")
+        sx = _window_sums(x)
+        sy = _window_sums(y)
+        sxx = _window_sums(ImageMath.lambda_eval(lambda a: a["x"] * a["x"], x=x))
+        syy = _window_sums(ImageMath.lambda_eval(lambda a: a["y"] * a["y"], y=y))
+        sxy = _window_sums(ImageMath.lambda_eval(lambda a: a["x"] * a["y"], x=x, y=y))
+        # Exact numerators: sum(x)*sum(y), n*sum(xy) - sum(x)*sum(y), ...
+        cross = ImageMath.lambda_eval(lambda a: a["sx"] * a["sy"], sx=sx, sy=sy)
+        squares = ImageMath.lambda_eval(lambda a: a["sx"] * a["sx"] + a["sy"] * a["sy"],
+                                        sx=sx, sy=sy)
+        covariance = ImageMath.lambda_eval(lambda a: a["sxy"] * n - a["p"], sxy=sxy, p=cross)
+        variances = ImageMath.lambda_eval(lambda a: (a["sxx"] + a["syy"]) * n - a["q"],
+                                          sxx=sxx, syy=syy, q=squares)
         ssim_map = ImageMath.lambda_eval(
-            lambda a: ((2 * a["mx"] * a["my"] + _SSIM_C1)
-                       * (2 * (a["xy"] - a["mx"] * a["my"]) + _SSIM_C2))
-            / ((a["mx"] * a["mx"] + a["my"] * a["my"] + _SSIM_C1)
-               * (a["xx"] - a["mx"] * a["mx"] + a["yy"] - a["my"] * a["my"] + _SSIM_C2)),
-            mx=mean_x, my=mean_y, xx=xx, yy=yy, xy=xy,
+            lambda a: ((2 * mean_scale * a["p"] + _SSIM_C1)
+                       * (2 * var_scale * a["c"] + _SSIM_C2))
+            / ((mean_scale * a["q"] + _SSIM_C1) * (var_scale * a["v"] + _SSIM_C2)),
+            p=cross.convert("F"), q=squares.convert("F"),
+            c=covariance.convert("F"), v=variances.convert("F"),
         )
         values = array.array("f", ssim_map.tobytes())
         scores.append(sum(values) / len(values))
@@ -756,23 +797,43 @@ def _matching_quality(img: Image.Image, encode, target_psnr: float,
                       target_ssim: float) -> bytes | None:
     """The lowest-quality encoding of `img` at least as faithful as the targets.
 
-    Fidelity rises with the quality setting, so the setting is bisected: seven
-    encodings instead of a hundred. Only an encoding that passes both tests
-    is ever returned.
+    Fidelity rises with the quality setting, so the setting is bisected. The
+    PSNR, cheap, is searched first; the SSIM, which costs a second or two on a
+    whole page, is then checked at the quality found, and searched upwards from
+    there only when it falls short. Only an encoding that passes both tests is
+    ever returned.
     """
-    low, high = 1, 100
-    found = None
-    while low <= high:
-        quality = (low + high) // 2
-        payload = encode(quality)
-        decoded = Image.open(io.BytesIO(payload))
-        decoded.load()
-        if _psnr(img, decoded) >= target_psnr and _ssim(img, decoded) >= target_ssim:
-            found = payload
-            high = quality - 1
-        else:
-            low = quality + 1
-    return found
+    payloads = {}
+
+    def decoded(quality: int) -> Image.Image:
+        if quality not in payloads:
+            payloads[quality] = encode(quality)
+        image = Image.open(io.BytesIO(payloads[quality]))
+        image.load()
+        return image
+
+    def lowest(passes, low: int) -> int | None:
+        high, found = 100, None
+        while low <= high:
+            quality = (low + high) // 2
+            if passes(quality):
+                found, high = quality, quality - 1
+            else:
+                low = quality + 1
+        return found
+
+    def psnr_passes(quality: int) -> bool:
+        return _psnr(img, decoded(quality)) >= target_psnr
+
+    def both_pass(quality: int) -> bool:
+        image = decoded(quality)
+        return (_psnr(img, image) >= target_psnr
+                and _ssim(img, image) >= target_ssim)
+
+    quality = lowest(psnr_passes, 1)
+    if quality is not None and _ssim(img, decoded(quality)) < target_ssim:
+        quality = lowest(both_pass, quality + 1)
+    return None if quality is None else payloads[quality]
 
 
 @functools.lru_cache(maxsize=None)
@@ -815,6 +876,11 @@ def _compact_payload(img: Image.Image, payload: bytes, lzma_preset: int) -> byte
             encoders.append(lambda q: _image_bytes(img, format="WEBP", quality=q,
                                                    method=6))
         for encode in encoders:
+            # Quality 1 is the smallest a codec can make. When even that is no
+            # smaller than the best so far -- AVIF's headers alone outweigh a
+            # small JPEG -- no quality can win, and the search is skipped.
+            if stored(encode(1)) >= best[0]:
+                continue
             found = _matching_quality(img, encode, target_psnr, target_ssim)
             if found is not None and stored(found) < best[0]:
                 best = (stored(found), found)
@@ -825,7 +891,11 @@ def _compact_payload(img: Image.Image, payload: bytes, lzma_preset: int) -> byte
         source.load()
         if source.mode not in ("L", "RGB"):
             source = source.convert("RGB")
-        webp = _image_bytes(source, format="WEBP", lossless=True, quality=100, method=6)
+        # Effort 4 at quality 100: on 740 PNG payloads from six documents,
+        # 6.6 % below the PNGs. The slowest setting, method 6, saves about a
+        # point and a half more and takes thirty-five times as long -- most of
+        # a minute on a document full of diagrams.
+        webp = _image_bytes(source, format="WEBP", lossless=True, quality=100, method=4)
         if stored(webp) < best[0]:
             best = (stored(webp), webp)
     return best[1]
@@ -2001,6 +2071,288 @@ def _split_span_runs(span) -> list:
 _SPAN_STYLE_KEYS = ("f", "fa", "sz", "c")
 
 
+# See _trusts_guessed_spaces. On the 51 documents of the 2.5.0 test bench,
+# pages set by LaTeX carry at most 0.03 typed space per guessed one. Every
+# other page with guessed spaces carries 0.18 or more -- htmldoc, slides from
+# Mac OS X --, the LibreOffice sheet 18 or more once its fixed-pitch letters
+# are read by their steps (see _settle_fixed_pitch), pages typed by Word a
+# hundred or more.
+_TYPED_PER_GUESSED_SPACE = 0.1
+
+
+def _trusts_guessed_spaces(raw: dict) -> bool:
+    """Whether the spaces MuPDF guessed on this page are word boundaries.
+
+    MuPDF supplies a space wherever the next glyph sits far enough from the
+    last, and marks it as guessed ("synthetic"). On a page whose producer
+    placed every word by moving the cursor -- LaTeX does, between every two
+    words -- the guessed spaces are the only word boundaries there are. On a
+    page whose producer typed its spaces they are mostly noise: a
+    LibreOffice sheet printed to PDF positions every glyph on its own, and
+    MuPDF finds "spaces" inside "sinistrées". Guessed spaces are trusted
+    where typed ones are rare against them.
+    """
+    typed = guessed = 0
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                for char in span.get("chars") or []:
+                    if char["c"] == " ":
+                        if char.get("synthetic"):
+                            guessed += 1
+                        else:
+                            typed += 1
+    return guessed > 0 and typed <= _TYPED_PER_GUESSED_SPACE * guessed
+
+
+def _is_horizontal(line: dict) -> bool:
+    """Whether a rawdict line runs left to right along the page."""
+    direction = line.get("dir", (1, 0))
+    return line.get("wmode", 0) == 0 and direction[0] > 0.999
+
+
+# See _fixed_pitch_fonts. In the fixed-pitch cells of the LibreOffice
+# situation sheet, 96 to 100 % of the steps between two letters come within
+# 5 % of the pitch, taken by 11 to 30 different letters per font and page,
+# whose widths span 0.47 of the pitch or more. The nearest anything else on
+# the 51-document bench came was a few capitals of similar width in a page
+# of geometry, "PQ" and "AB": six letters at most, within a fifth of the
+# step of one another.
+_PITCH_MIN_PAIRS = 20
+_PITCH_TOLERANCE = 0.05
+_PITCH_SHARE = 0.8
+_PITCH_MIN_LETTERS = 8
+_PITCH_WIDTH_RANGE = 1 / 3
+
+
+def _fixed_pitch_fonts(raw: dict) -> dict:
+    """Fonts this page advances by a fixed step, whatever each letter's width.
+
+    The LibreOffice situation sheet was printed that way. Its cells are laid
+    out in the 0.6 em pitch of a monospaced font -- the Excel copy of the
+    same sheet sets them in Courier New -- but drawn in DejaVu Sans, whose
+    "i" is less than half the step wide and whose "m" is wider than it: one
+    TJ per line moves each glyph on to the next step. Behind every narrow
+    letter a gap of up to a third of an em remains, which MuPDF takes for a
+    space: "Nbr e de pl aces r est ant es".
+
+    A font qualifies when most steps between two letters come within
+    _PITCH_TOLERANCE of one value, while the letters taking that step are
+    many and of clearly different widths. Proportional text advances by each
+    letter's own width and never meets the first condition; a monospaced
+    font, whose letters are as wide as the step, leaves no gap to misread. A
+    few capitals of similar width can share a step by chance -- "PQ" and
+    "AB" in a page of geometry -- which the letter count rules out.
+
+    Returns the pitch in ems, keyed by font name and size.
+    """
+    pairs: dict = {}
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", []):
+            if not _is_horizontal(line):
+                continue
+            for span in line.get("spans", []):
+                size = span.get("size") or 0
+                if size <= 0:
+                    continue
+                glyphs = [char for char in span.get("chars") or [] if not char.get("synthetic")]
+                for first, second in zip(glyphs, glyphs[1:]):
+                    if not (first["c"].isalpha() and second["c"].isalpha()):
+                        continue
+                    step = (second["origin"][0] - first["origin"][0]) / size
+                    if step > 0:
+                        width = (first["bbox"][2] - first["bbox"][0]) / size
+                        pairs.setdefault((span.get("font"), size), []).append(
+                            (step, width, first["c"]))
+    pitches = {}
+    for key, found in pairs.items():
+        if len(found) < _PITCH_MIN_PAIRS:
+            continue
+        pitch = statistics.median(step for step, _, _ in found)
+        regular = [(width, letter) for step, width, letter in found
+                   if abs(step - pitch) <= _PITCH_TOLERANCE * pitch]
+        widths = [width for width, _ in regular]
+        if (len(regular) >= _PITCH_SHARE * len(found)
+                and len({letter for _, letter in regular}) >= _PITCH_MIN_LETTERS
+                and max(widths) - min(widths) >= _PITCH_WIDTH_RANGE * pitch):
+            pitches[key] = pitch
+    return pitches
+
+
+def _settle_fixed_pitch(raw: dict) -> None:
+    """Read the letters of a font set at a fixed pitch by their steps.
+
+    See _fixed_pitch_fonts: there the step settles what MuPDF could only
+    guess from the gaps. A glyph takes one step per letter it stands for --
+    two or three for a ligature -- and a word space takes one more, typed or
+    left blank, as between "demande" and "de" on the situation sheet. So a
+    space MuPDF guessed between glyphs a whole step further apart than that
+    is kept, as certain as a typed one; between glyphs closer than half a
+    step more, it goes, whatever gap their shapes leave.
+
+    Across a single blank step, the words on either side are joined into one
+    span, the kept space between them, as a typed space would join them.
+    MuPDF hands such a space over in a span of its own, and the words, more
+    than _SPAN_SPLIT_RATIO apart, would otherwise travel as separate runs --
+    which the original decoder, concatenating the spans of a line, reads as
+    "demandede". Two blank steps or more may part two cells, and stay apart.
+
+    A ligature's box is widened by the steps it takes beyond its own glyph.
+    Left as it is, the two-step gap after "ﬁ" in "traﬁc" or after "ﬀ" in
+    "aﬀectés" reads as a cursor move between columns, and the word is split
+    in two (see _split_span_runs).
+    """
+    pitches = _fixed_pitch_fonts(raw)
+    if not pitches:
+        return
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", []):
+            if not _is_horizontal(line):
+                continue
+            dropped = set()
+            joined = set()  # spans to append to the span before them
+            last = None     # (span, char) of the last glyph that is not a space
+            guessed = []    # (span, char) of the spaces MuPDF supplied since
+            for span in line.get("spans", []):
+                key = (span.get("font"), span.get("size"))
+                pitch = pitches.get(key)
+                for char in span.get("chars") or []:
+                    if char["c"] == " ":
+                        if char.get("synthetic"):
+                            guessed.append((span, char))
+                        continue
+                    if (guessed and last is not None and pitch is not None
+                            and key == (last[0].get("font"), last[0].get("size"))):
+                        letters = len(_LIGATURES.get(last[1]["c"], last[1]["c"]))
+                        steps = (char["origin"][0] - last[1]["origin"][0]) / span["size"] / pitch
+                        if 0 < steps < letters + 0.5:
+                            dropped.update(id(space) for _, space in guessed)
+                        elif steps > 0:
+                            for _, space in guessed:
+                                space["synthetic"] = False
+                            between = {id(owner): owner for owner, _ in guessed}
+                            if (steps < letters + 1.5
+                                    and id(last[0]) not in between and id(span) not in between
+                                    and all(not c["c"].strip() for owner in between.values()
+                                            for c in owner.get("chars") or [])
+                                    and last[0].get("color") == span.get("color")
+                                    and last[0].get("flags") == span.get("flags")):
+                                joined.update(between)
+                                joined.add(id(span))
+                    if pitch is not None and char["c"] in _LIGATURES:
+                        x0, y0, x1, y1 = char["bbox"]
+                        extra = (len(_LIGATURES[char["c"]]) - 1) * pitch * span["size"]
+                        char["bbox"] = (x0, y0, x1 + extra, y1)
+                    guessed = []
+                    last = (span, char)
+            if dropped or joined:
+                spans = []
+                for span in line.get("spans", []):
+                    chars = [char for char in span.get("chars") or [] if id(char) not in dropped]
+                    if id(span) in joined and spans:
+                        spans[-1]["chars"].extend(chars)
+                    elif chars:
+                        span["chars"] = chars
+                        spans.append(span)
+                line["spans"] = spans
+
+
+def _space_overlooked_after(char: str) -> bool:
+    """Whether MuPDF declines to guess a space after `char`, in a script that uses them.
+
+    MuPDF guesses a space only after Basic Latin to Arabic, general
+    punctuation, super- and subscripts and currency signs (may_add_space in
+    its stext-device.c), so that text written without spaces between words
+    -- Chinese, Japanese, Thai -- gets none. The rule leaves out the Latin
+    ligatures, the Latin and Greek letters of the extended blocks, and the
+    symbols: arrows, mathematical operators, technical and geometric signs,
+    the private code points of symbol fonts and the mathematical alphabets.
+    """
+    if len(char) != 1:
+        return False
+    code = ord(char)
+    return (0xFB00 <= code <= 0xFB06 or 0x1E00 <= code <= 0x1FFF
+            or 0x20D0 <= code <= 0x2BFF or 0xE000 <= code <= 0xF8FF
+            or 0x1D400 <= code <= 0x1D7FF)
+
+
+# MuPDF guesses a space where the next glyph starts at least this far past the
+# end of the last one, in ems of the next glyph's size (SPACE_DIST in its
+# stext-device.c).
+_GUESSED_SPACE_EM = 0.15
+
+
+def _overlooked_space(char: dict, following: dict, size: float) -> dict | None:
+    """The space MuPDF would have guessed between two glyphs, or None."""
+    if (size <= 0 or not char["c"].strip() or not following["c"].strip()
+            or not _space_overlooked_after(char["c"])
+            or following["bbox"][0] - char["bbox"][2] < _GUESSED_SPACE_EM * size):
+        return None
+    return {
+        "c": " ",
+        "synthetic": True,
+        "origin": (char["bbox"][2], char["origin"][1]),
+        "bbox": (char["bbox"][2], char["bbox"][1], following["bbox"][0], char["bbox"][3]),
+    }
+
+
+def _add_overlooked_spaces(raw: dict) -> None:
+    """Supply the spaces MuPDF declines to guess after ligatures and symbols.
+
+    Only on pages whose word boundaries are MuPDF's guesses (see
+    _trusts_guessed_spaces). There a word ending in a ligature runs into the
+    next -- "trade offwith" in the codec2 specification -- and so does
+    whatever follows a symbol LaTeX sets apart: "x ∈X". The space is guessed
+    here as MuPDF would have, at its own distance, after the characters its
+    rule leaves out (see _space_overlooked_after): inside the span, or as a
+    span of its own where the next glyph starts another, which is how MuPDF
+    hands over the spaces it guesses itself.
+    """
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", []):
+            if not _is_horizontal(line):
+                continue
+            original = line.get("spans", [])
+            spans = []
+            for index, span in enumerate(original):
+                chars = span.get("chars") or []
+                size = span.get("size") or 0
+                filled = []
+                for position, char in enumerate(chars):
+                    filled.append(char)
+                    if position + 1 < len(chars):
+                        space = _overlooked_space(char, chars[position + 1], size)
+                        if space is not None:
+                            filled.append(space)
+                span["chars"] = filled
+                spans.append(span)
+                following = original[index + 1] if index + 1 < len(original) else None
+                if chars and following is not None and following.get("chars"):
+                    space = _overlooked_space(chars[-1], following["chars"][0],
+                                              following.get("size") or 0)
+                    if space is not None:
+                        spans.append({"font": following.get("font"),
+                                      "size": following.get("size"),
+                                      "color": following.get("color"), "chars": [space]})
+            line["spans"] = spans
+
+
+def _restore_space(previous: dict, text: str, box, size: float) -> None:
+    """Put back the space MuPDF found between `previous` and the word `text`.
+
+    Only where the decoders set the two in one run -- no further apart than
+    _SPAN_SPLIT_RATIO of the font size, see _draw_line -- since that is where
+    they would otherwise run together. Further apart, each is placed on its
+    own and a trailing space would only widen the first. The space goes on
+    the word before: the next one's box starts at its first glyph, and a
+    leading space would push it right.
+    """
+    gap = box[0] - previous["b"][2]
+    if (gap <= max(1.0, _SPAN_SPLIT_RATIO * size)
+            and not previous["t"][-1:].isspace() and not text[:1].isspace()):
+        previous["t"] += " "
+
+
 def _merge_adjacent_spans(spans: list, line_box) -> list:
     """Join consecutive spans of one style that the reader sets as one run.
 
@@ -2155,7 +2507,16 @@ def _extract_page(page, page_idx: int, images_data: dict,
     # Base-14 faces and their glyph advances, shared by every page of a
     # document when the caller passes one dict along.
     faces = faces if faces is not None else {}
-    for block in page.get_text("rawdict").get("blocks", []):
+    raw = page.get_text("rawdict")
+    # The spaces MuPDF guessed, corrected where they can be checked: settled
+    # by the pitch where letters advance by a fixed step, then -- on a page
+    # whose word boundaries are all guesses -- supplied where MuPDF's own
+    # rule declines to guess one.
+    _settle_fixed_pitch(raw)
+    trust_guessed = _trusts_guessed_spaces(raw)
+    if trust_guessed:
+        _add_overlooked_spaces(raw)
+    for block in raw.get("blocks", []):
         if block.get("type") != 0:
             continue
 
@@ -2163,7 +2524,21 @@ def _extract_page(page, page_idx: int, images_data: dict,
             if _covered(line["bbox"], artwork):
                 continue
             out_line: dict = {"b": _quantize_box(line["bbox"], precision), "s": []}
+            # Set by a span of spaces only, cleared by the next word.
+            space_between = False
             for span in line.get("spans", []):
+                chars = span.get("chars") or []
+                if chars and not any(char["c"].strip() for char in chars):
+                    # A span of spaces only: MuPDF gives a space a span of its
+                    # own when it differs in style from its neighbours, or
+                    # when it supplied the space itself (see
+                    # _trusts_guessed_spaces). Dropped, the words on either
+                    # side ran together -- "SystemRequirements" -- in both
+                    # decoders and in the original's. It goes back on the
+                    # word before, below.
+                    if trust_guessed or any(not char.get("synthetic") for char in chars):
+                        space_between = True
+                    continue
                 if _span_is_lost(span, bad_fonts):
                     # Lost to a missing ToUnicode table. The raster made from
                     # this span's box carries the real glyphs; a transcription
@@ -2183,13 +2558,17 @@ def _extract_page(page, page_idx: int, images_data: dict,
                     text = _normalize_text(raw_text)
                     if not text.strip():
                         continue
+                    stored_box = _quantize_box(box, precision)
+                    if space_between and out_line["s"]:
+                        _restore_space(out_line["s"][-1], text, stored_box, size)
+                    space_between = False
                     out_span = {
                         "t": text,
                         "f": font_key,
                         "fa": family,
                         "sz": size,
                         "c": colour,
-                        "b": _quantize_box(box, precision),
+                        "b": stored_box,
                     }
                     # Drop anything the reader reconstructs on its own.
                     for key, default in _SPAN_DEFAULTS.items():

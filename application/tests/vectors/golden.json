@@ -9,9 +9,33 @@
    "sha256": "4481275c166b6395f5beb2d103f9ce8f7b0f7f92882c402cded37ebbc1a4762d",
    "size": 6659
   },
+  "latex|compact=True|quality=ultra_low": {
+   "sha256": "64e41a952667db5c9a9cee4f2acf8429dcb9b7480bdeaa076fe7b1bf31fd3da1",
+   "size": 515
+  },
+  "latex|quality=medium": {
+   "sha256": "36a0e86043ccbadeac4e53148074e40fffab37c7f54bb40d57e28af3ba5a1c4a",
+   "size": 601
+  },
   "mono|mode=image|quality=low": {
    "sha256": "4fa9d79b00f9d3f14379f2dc65a97f97299d4cbb6e01cf88105358084a840f0b",
    "size": 32186
+  },
+  "overlooked|compact=True|quality=ultra_low": {
+   "sha256": "7cd851dc60d86522af319c598b351eddd7d5cfbbc9a0b0bcba36d6a501ffad38",
+   "size": 223
+  },
+  "overlooked|quality=medium": {
+   "sha256": "c8b2641c04883be0c2dc609bdfc75f7d893d320a62dcce3b304e5129dc5c14c2",
+   "size": 226
+  },
+  "pitch|compact=True|quality=ultra_low": {
+   "sha256": "6f52714d2aae26d8309c0a1712e7bea6c9f31de909dc99489a28128acbedfdbb",
+   "size": 267
+  },
+  "pitch|quality=medium": {
+   "sha256": "dfe2831ed11de877cbc0ce642203fb86c04234954bffc1c13309cd8c48bf5679",
+   "size": 283
   },
   "report_3p|compact=True|quality=medium": {
    "sha256": "4acd239a02f874fa5172169beea6ed302c4dc97a4b7545597f48a9288647d26f",

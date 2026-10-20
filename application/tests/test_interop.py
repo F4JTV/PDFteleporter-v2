@@ -68,6 +68,15 @@ CASES = [
     ("sheet", "bordered_sheet", {"quality": "medium"}),
     ("graphics", "graphics_report", {"quality": "ultra_low"}),
     ("graphics", "graphics_report", {"quality": "medium"}),
+    # Words placed by cursor moves, LaTeX-style: the spaces MuPDF guesses.
+    ("latex", "cursor_spaced", {"quality": "medium"}),
+    ("latex", "cursor_spaced", {"quality": "ultra_low", "compact": True}),
+    # Where MuPDF guesses wrong: letters at a fixed pitch, LibreOffice-style,
+    # and the spaces it declines to guess after a ligature or a symbol.
+    ("pitch", "fixed_pitch_cells", {"quality": "medium"}),
+    ("pitch", "fixed_pitch_cells", {"quality": "ultra_low", "compact": True}),
+    ("overlooked", "overlooked_spaces", {"quality": "medium"}),
+    ("overlooked", "overlooked_spaces", {"quality": "ultra_low", "compact": True}),
     # Compact archives (.psdz), documents without images only.
     ("report_3p", "text_report", {"quality": "ultra_low", "compact": True}),
     ("report_3p", "text_report", {"quality": "medium", "compact": True}),
@@ -441,6 +450,49 @@ class TestOriginalDecoder(unittest.TestCase):
                         self.assertAlmostEqual(ga[2][0], gb[2][0], delta=0.001)
                         self.assertAlmostEqual(ga[2][1], gb[2][1], delta=0.001)
                         self.assertAlmostEqual(ga[3], gb[3], delta=0.001)
+
+    def test_words_placed_by_cursor_moves_reach_its_stations_spaced(self):
+        # The spaces put back between words that LaTeX placed by cursor moves
+        # are plain characters in the text: the original's decoder, which
+        # concatenates the spans of a line, sets them like any other. Its own
+        # encoder drops them, as ours did until 2.5.0.
+        from collections import Counter
+
+        path = fixtures.cursor_spaced(os.path.join(self._tmp.name, "latex.pdf"))
+        with open(path, "rb") as handle:
+            original = self._words(handle.read())
+        prose = Counter(original[:original.index("·")])  # bullet and table aside
+        data, _ = engine.pdf_to_archive(path, quality="medium")
+        theirs = Counter(self._words(self.original.archive_to_pdf(data)[0]))
+        self.assertEqual(prose - theirs, Counter())
+        legacy, _ = self.original.pdf_to_archive(path, quality="medium", mode="struct")
+        glued = Counter(self._words(self.original.archive_to_pdf(legacy)[0]))
+        self.assertNotEqual(prose - glued, Counter(), "the original glued them; "
+                            "this fixture no longer reproduces the defect")
+
+    def test_spaces_mupdf_misreads_reach_its_stations_corrected(self):
+        # Settled by the pitch on cells laid out like the LibreOffice sheet,
+        # supplied after a ligature and symbols: plain characters again, and
+        # the words a blank step apart share one span, since the original
+        # concatenates the spans of a line. Its own encoder keeps MuPDF's
+        # reading.
+        cases = (
+            ("fixed_pitch_cells", "Nombre de personnes sinistrées Nbre de places restantes "
+                                  "Activation du plan communal Nombre de demande de renfort "
+                                  "Trafic routier perturbé"),
+            ("overlooked_spaces", "Le défi est relevé. Soit x ∈ X et a − b = −1."),
+        )
+        for factory, expected in cases:
+            with self.subTest(doc=factory):
+                path = getattr(fixtures, factory)(os.path.join(self._tmp.name, factory + ".pdf"))
+                data, _ = engine.pdf_to_archive(path, quality="medium")
+                theirs = self._words(self.original.archive_to_pdf(data)[0])
+                self.assertEqual([engine._normalize_text(w) for w in theirs], expected.split())
+                legacy, _ = self.original.pdf_to_archive(path, quality="medium", mode="struct")
+                misread = self._words(self.original.archive_to_pdf(legacy)[0])
+                self.assertNotEqual([engine._normalize_text(w) for w in misread], expected.split(),
+                                    "the original read them right; this fixture no longer "
+                                    "reproduces the defect")
 
     def test_compact_archives_are_refused_by_number(self):
         # A .psdz reaching a station that runs the original must be turned
