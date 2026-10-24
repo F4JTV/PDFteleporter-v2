@@ -12,23 +12,26 @@ reference/       sources récupérés de l'implémentation originale, 1.0.6 et 2
 ```
 
 Cette application est dérivée du travail de **F1GBD (ADRASEC 77 – FNRASEC)**,
-auteur du PDFteleporter original et du format `.psdi`, distribué sous GNU GPL v3.
-Voir `application/README.md` pour l'attribution détaillée et la liste des
-changements. Le format `.psdi` est conservé à l'identique ; la version 2.5.0
-ajoute, au choix de l'opérateur, une archive compacte `.psdz` que seule cette
-application lit.
+auteur du PDFteleporter original et du format `.psdi`, distribué sous GNU GPL v3
+jusqu'à sa version 2.1.0. Voir `application/README.md` pour l'attribution
+détaillée et la liste des changements. Le format `.psdi` est conservé à
+l'identique ; la version 2.5.0 ajoute, au choix de l'opérateur, une archive
+compacte `.psdz` que seule cette application lit, et la 2.6.0 échange avec la
+version 2.2.0 de F1GBD dans les deux sens.
 
 ## application/
 
 ```
 psditool/format.py          conteneurs .psdi et .psdz, disposition binaire
 psditool/engine.py          compression et recomposition, deux modes
+psditool/symbols.py         codes privés de Symbol et Wingdings, en Unicode
+psditool/fonts/             Carlito (chasses de Calibri), sous SIL OFL 1.1
 psditool/presets.py         préréglages de qualité, estimations de transfert
 psditool/cli.py             CLI headless, aussi le point d'entrée du menu contextuel
 psditool/shell_windows.py   intégration Explorateur (registre)
 psditool/resources.py       résolution des ressources embarquées
 psditool/gui/               interface PyQt6, style Fusion
-tests/                      264 tests : conteneur, format compact, moteur,
+tests/                      309 tests : conteneur, format compact, moteur,
                             interopérabilité, menu contextuel, mentions
 tests/vectors/golden.json   empreintes des archives de référence
 tests/vectors/*.psdz        archive compacte conservée, garde du décodeur
@@ -55,7 +58,10 @@ ce qu'il faut. Depuis les sources, aucune compilation n'est nécessaire :
 L'original est distribué en bundle PyInstaller sans source, sous GNU GPL v3,
 qui accorde le droit de le récupérer et de le modifier. Deux versions ont été
 reconstituées : la 1.0.6, point de départ de la réécriture, et la 2.1.0 d'août
-2026, la plus récente publiée.
+2026, la dernière publiée sous GPL. La 2.2.0 d'octobre 2026, réécrite et
+publiée sous licence PolyForm Noncommercial 1.0.0, ne l'a pas été : sa licence
+n'est pas compatible avec celle de ce projet. Elle n'a été qu'exécutée, à
+part, pour vérifier les échanges d'archives.
 
 ```
 sources/pdf_trans.py         moteur 1.0.6, 37 fonctions + PDFTransferManager
@@ -63,7 +69,7 @@ sources/psdi_lib.py          moteur 2.1.0 — le même bytecode à une fonction 
 sources/PDFteleporter.py     IHM 2.1.0, PyQt6 (la 1.0.6 était en Tkinter)
 disasm/*.dis                 désassemblages complets, le recours faisant foi
 disasm/*.pyc                 le bytecode extrait lui-même
-bench/bench.json             banc psdi_lib 2.1.0 contre psditool 2.4.0 : tailles,
+bench/bench.json             banc psdi_lib 2.1.0 contre psditool 2.6.0 : tailles,
                              temps, et les 128 recompositions croisées
 bench/*.diff                 différence instruction par instruction des deux moteurs
 tools/bench.py               le banc — charge psdi_lib depuis son .pyc

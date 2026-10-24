@@ -520,6 +520,76 @@ def fixed_pitch_cells(path: str) -> str:
     return path
 
 
+def _strip(x0: float, y0: float, x1: float, y1: float, grey: int) -> str:
+    """A filled box drawn as LibreOffice draws one: four segments, the last
+    back to the start, then closed and filled even-odd. MuPDF reports the
+    four segments as they are; with three, it would fold them into a box."""
+    return (f"{grey} g {x0} {y0} m {x1} {y0} l {x1} {y1} l {x0} {y1} l "
+            f"{x0} {y0} l h f*")
+
+
+def _double_border(x0: float, x1: float, y: float) -> list:
+    """A double rule as LibreOffice paints it: black, white, black strips."""
+    return [_strip(x0, y + 0.2 * k, x1, y + 0.2 * (k + 1), grey)
+            for k, grey in enumerate((0, 1, 0))]
+
+
+def clipped_borders(path: str) -> str:
+    """Borders painted and then clipped away, and others left to show.
+
+    How LibreOffice exports a sheet with double cell borders: each rule is
+    three strips a fifth of a point thick, each a closed outline of four
+    segments, and some are painted inside a clip that leaves nothing of them.
+    Below the hidden ones stand a cell and its text; further down, a double
+    rule nobody clips. On the right, a grey fill far larger than the clip it
+    is painted through, over a black rule drawn before it.
+    """
+    doc = fitz.open()
+    ops = [
+        "0 0 0 RG 0.5 w 60 700 200 40 re S",
+        "BT /F1 9 Tf 66 715 Td (Commentaires du jour) Tj ET",
+        # Hidden: the clip is the cell's inside, the strips run around it.
+        "q 70 600 150 30 re W n",
+        *_double_border(50, 260, 650),
+        *_double_border(50, 260, 560),
+        _strip(50, 560, 50.2, 650, 0), _strip(50.2, 560, 50.4, 650, 1),
+        _strip(50.4, 560, 50.6, 650, 0),
+        "Q",
+        "BT /F1 9 Tf 75 610 Td (Texte sous les bordures cachees) Tj ET",
+        # Shown: the same strips with no clip over them.
+        *_double_border(60, 260, 500),
+        # A black rule, then a grey fill clipped to a small part of itself.
+        "0 0 0 RG 1 w 450 500 m 550 500 l S",
+        "q 320 600 80 100 re W n 0.8 g 300 400 260 400 re f Q",
+    ]
+    _raw_page(doc, {"F1": "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"},
+              "\n".join(ops))
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
+
+
+def placeholder_font_names(path: str, font_file: str) -> str:
+    """Text in Carlito Bold, under the name Microsoft Print to PDF gives fonts.
+
+    Every font of a document printed that way is called "CIDFont+F1",
+    "CIDFont+F2"...: the name says nothing, and only the font program inside
+    knows it is Calibri Bold. Carlito, with its widths, stands in for it.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=200)
+    page.insert_font(fontname="F1", fontfile=font_file)
+    page.insert_text((20, 50), "Bilan de situation", fontname="F1", fontsize=12)
+    page.insert_text((20, 80), "Moyens engagés", fontname="helv", fontsize=12)
+    xref = page.get_fonts(full=True)[0][0]
+    doc.xref_set_key(xref, "BaseFont", "/CIDFont+F1")
+    descendant = int(doc.xref_get_key(xref, "DescendantFonts")[1].strip("[]").split()[0])
+    doc.xref_set_key(descendant, "BaseFont", "/CIDFont+F1")
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
+
+
 def overlooked_spaces(path: str) -> str:
     """LaTeX-like prose with a ligature and symbols at word boundaries.
 

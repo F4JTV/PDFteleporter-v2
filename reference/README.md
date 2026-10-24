@@ -18,7 +18,7 @@ sources/psdi_lib.py          moteur 2.1.0 — le même bytecode à une fonction 
 sources/PDFteleporter.py     IHM 2.1.0, PyQt6 (la 1.0.6 était en Tkinter)
 disasm/*.dis                 désassemblages complets, le recours faisant foi
 disasm/*.pyc                 le bytecode extrait lui-même (CPython 3.13)
-bench/bench.json             banc psdi_lib 2.1.0 contre psditool 2.4.0 : tailles,
+bench/bench.json             banc psdi_lib 2.1.0 contre psditool 2.6.0 : tailles,
                              temps, et les 128 recompositions croisées
 bench/*.diff                 différence instruction par instruction des deux moteurs
 tools/bench.py               le banc — charge psdi_lib depuis son .pyc
@@ -39,6 +39,16 @@ reproduisent le travail de F1GBD tel que le bytecode le contient ; seules la
 décompilation et la mise en forme sont de notre fait. Ils restent sous sa
 licence. Les outils de `tools/`, le banc et les notes ont été écrits pour ce
 projet, sous la même licence (`GPL-3.0-only`, voir `LICENSE.txt` à la racine).
+
+## Et la 2.2.0 ?
+
+F1GBD a publié en octobre 2026 une version 2.2.0, réécrite sur d'autres
+bibliothèques et distribuée sous licence PolyForm Noncommercial 1.0.0. Elle ne
+figure pas ici : cette licence n'est pas compatible avec la GPL v3 de ce projet,
+et rien n'en a été extrait ni lu. Pour vérifier que les deux programmes lisent
+les archives l'un de l'autre, elle a été installée à part et exécutée en boîte
+noire, sur onze documents ; `application/README.md` (version 2.6.0) en donne les
+mesures.
 
 ## Ce que montrent les deux versions
 
@@ -100,11 +110,13 @@ recomposer chaque archive par chaque décodeur : tailles, temps de compression e
 de recomposition, nombre de mots retrouvés et écart de rendu à l'original. Il
 écrit une ligne JSON par cas à l'écran et le tout dans
 `<dossier de sortie>/bench.json`. `bench/bench.json` est cette sortie pour
-psditool 2.4.0 ; sur ces documents, la 2.4.1 et la 2.5.0 émettent les mêmes
-archives `.psdi` octet pour octet — aucun n'a les espaces manquantes ou
-parasites que corrige la 2.5.0 —, ses tailles et ses recompositions valent donc
-aussi pour elles. Les archives compactes `.psdz` de la 2.5.0, que `psdi_lib`
-refuse par leur numéro de version, n'y figurent pas.
+psditool 2.6.0 : les 128 recompositions passent. En mode structuré, la 2.6.0
+y pèse 0,1 à 13 % de plus que la 2.4.0 à 2.5.x, dont les boîtes de texte
+n'étaient pas accrochées à la ligne de base, et s'y recompose bien plus près de l'original, par les deux
+décodeurs : sur le rapport texte, l'écart moyen de rendu tombe de 6,5 à 1,0
+niveau de gris par notre décodeur, de 6,5 à 2,7 par celui de `psdi_lib`. Les
+archives compactes `.psdz`, que `psdi_lib` refuse par leur numéro de version,
+n'y figurent pas.
 
 Pour comparer deux bytecodes, docstrings et numéros de ligne ignorés :
 

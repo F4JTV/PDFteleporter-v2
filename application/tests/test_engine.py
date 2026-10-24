@@ -710,6 +710,9 @@ class TestTextEncoding(unittest.TestCase):
         self.assertEqual(len(engine._merge_adjacent_spans(spans, line_box)), 3)
 
     def test_joined_fragments_render_the_same(self):
+        # Fragments that touch are set one after the other; joined, they are
+        # set as one string from the first one's place: the same words at
+        # the same places.
         line_box = [100, 100, 220.4, 110]
         fragments = [{"t": "Iden", "sz": 8.5, "b": [100, 100, 115.3, 110]},
                      {"t": "ti", "sz": 8.5, "b": [115.2, 100, 120, 110]},
@@ -718,29 +721,69 @@ class TestTextEncoding(unittest.TestCase):
         joined = engine._merge_adjacent_spans(fragments, line_box)
         self.assertEqual(len(joined), 2)
 
-        def render(spans):
+        def words(spans):
             manifest = {"v": "1.0.6", "pages": [{"pn": 1, "tb": [{"l": [{"b": line_box, "s": spans}]}]}],
                         "page_sizes": [{"w": 300, "h": 200}], "images": {}}
             pdf, _ = engine.archive_to_pdf(psdi.write_struct(manifest, {}, 6))
             doc = fitz.open(stream=pdf, filetype="pdf")
             try:
-                return doc[0].get_pixmap(dpi=150, colorspace=fitz.csGRAY).samples
+                return doc[0].get_text("words")
             finally:
                 doc.close()
 
-        self.assertEqual(render(fragments), render(joined))
+        apart, together = words(fragments), words(joined)
+        self.assertEqual([w[4] for w in apart], [w[4] for w in together])
+        for a, b in zip(apart, together):
+            self.assertAlmostEqual(a[0], b[0], delta=0.5)
+            self.assertAlmostEqual(a[2], b[2], delta=0.5)
+
+    @staticmethod
+    def _width(text, size, face="helv"):
+        return fitz.Font(face).text_length(text, fontsize=size)
 
     def test_a_line_that_fits_opens_its_box(self):
-        line = {"b": [100, 100, 150, 110], "s": [{"t": "Bonjour", "sz": 8}]}
+        width = self._width("Bonjour", 8)
+        line = {"b": [100, 100, 100 + width, 110.1], "s": [{"t": "Bonjour", "sz": 8}]}
         self.assertEqual(engine._open_line_box(line, 595.28, 841.89, 1, {}),
-                         [100, 100, 595.3, 841.9])
+                         [100, 100, 595.3, 110.1])
         self.assertEqual(engine._open_line_box(line, 595.28, 841.89, 0, {}),
-                         [100, 100, 595, 842])
+                         [100, 100, 595, 110.1])
+
+    def test_the_bottom_of_a_box_never_opens(self):
+        # The original's 2.2 sets a line from the bottom of its box: opened to
+        # the page corner, as up to 2.5, every line landed at the foot of the
+        # page.
+        width = self._width("Bonjour", 8)
+        line = {"b": [100, 100, 100 + width, 110.1], "s": [{"t": "Bonjour", "sz": 8}]}
+        self.assertEqual(engine._open_line_box(line, 595.28, 841.89, 1, {})[3], 110.1)
+
+    def test_a_justified_line_keeps_its_box(self):
+        # Its words are spread to the box: opened, that width would be lost.
+        text = "un deux trois quatre"
+        width = self._width(text, 8) + 6
+        line = {"b": [100, 100, 100 + width, 110], "s": [{"t": text, "sz": 8}]}
+        self.assertEqual(engine._open_line_box(line, 595.28, 841.89, 1, {}), line["b"])
+        # A single word narrower than its box is drawn the same either way.
+        line = {"b": [100, 100, 100 + self._width("mot", 8) + 6, 110], "s": [{"t": "mot", "sz": 8}]}
+        self.assertEqual(engine._open_line_box(line, 595.28, 841.89, 1, {})[2], 595.3)
 
     def test_a_line_shrunk_to_fit_keeps_its_box(self):
         # Wider in Helvetica than in the source font: the box sets the scale.
         line = {"b": [163.8, 87.8, 200.4, 98.2], "s": [{"t": "Identité Expéditeur", "sz": 8.5}]}
         self.assertEqual(engine._open_line_box(line, 842, 595, 1, {}), line["b"])
+
+    def test_a_calibri_line_is_measured_in_carlito_and_in_helvetica(self):
+        # Carlito is what this decoder sets it in; Helvetica, wider, is what
+        # the original's 2.1.0 does: it must fit both to be opened.
+        text = "Bilan"
+        carlito = engine._Fonts().get("c", "R").text_length(text, fontsize=10)
+        helvetica = self._width(text, 10)
+        self.assertLess(carlito, helvetica)
+        fits_both = {"b": [100, 100, 100 + helvetica - 0.5, 110], "s": [{"t": text, "sz": 10, "fa": "c"}]}
+        self.assertEqual(engine._open_line_box(fits_both, 595.28, 841.89, 1, {})[2], 595.3)
+        too_wide_in_helvetica = {"b": [100, 100, 100 + carlito, 110], "s": [{"t": text, "sz": 10, "fa": "c"}]}
+        self.assertEqual(engine._open_line_box(too_wide_in_helvetica, 595.28, 841.89, 1, {}),
+                         too_wide_in_helvetica["b"])
 
     def test_only_lines_the_base_fonts_can_set_are_opened(self):
         for spans in ([{"t": "日本", "sz": 8}],                   # glyphs missing from Helvetica
@@ -748,7 +791,7 @@ class TestTextEncoding(unittest.TestCase):
                       [{"t": "a", "sz": 8}, {"t": "b", "f": "B", "sz": 8}],  # two runs
                       [{"t": "a", "sz": 8, "b": [100, 100, 104, 110]}]):     # positioned span
             with self.subTest(spans=spans):
-                line = {"b": [100, 100, 300, 110], "s": spans}
+                line = {"b": [100, 100, 104.5, 110], "s": spans}
                 self.assertEqual(engine._open_line_box(line, 842, 595, 1, {}), line["b"])
 
     def test_a_box_past_the_page_edge_is_left_alone(self):
@@ -908,73 +951,402 @@ class TestPayloadCodec(unittest.TestCase):
 
 
 
-class TestTextLayer(EngineTestCase):
-    """The per-page text layer must place text exactly where per-run
-    insert_htmlbox did.
+class TestTextPlacement(unittest.TestCase):
+    """Text set on its baseline, in a font with the source's widths.
 
-    The layer exists for speed -- insert_htmlbox is quadratic in the number
-    of runs on a page -- and is only acceptable if it changes nothing on the
-    page. The two paths are compared through the text the PDF reports, which
-    is exact and independent of the rasteriser.
+    Up to 2.5 every line went through MuPDF's HTML layout, top-anchored 0.8 em
+    above a baseline the box did not give: a Helvetica line came out 0.27 em
+    too high, and Calibri in Helvetica, a tenth wider.
     """
 
-    def _words(self, pdf_bytes):
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    @staticmethod
+    def _rebuild(lines, hung=True, size=(300, 200)):
+        manifest = {"v": "1.0.6", "src": "t.pdf", "images": {},
+                    "page_sizes": [{"w": size[0], "h": size[1]}],
+                    "pages": [{"pn": 1, "tb": [{"l": lines}], "ir": [], "dr": [], "ck": []}]}
+        if hung:
+            manifest["tl"] = engine._TEXT_LAYOUT
+        pdf, _ = engine.archive_to_pdf(psdi.write_struct(manifest, {}, 6))
+        return pdf
+
+    @staticmethod
+    def _spans(pdf):
+        doc = fitz.open(stream=pdf, filetype="pdf")
         try:
-            return [page.get_text("words") for page in doc]
+            return [(span["font"], round(span["size"], 2), span["chars"][0]["origin"],
+                     "".join(c["c"] for c in span["chars"]))
+                    for block in doc[0].get_text("rawdict")["blocks"]
+                    for line in block.get("lines", []) for span in line["spans"]]
         finally:
             doc.close()
 
-    def _rebuild_both_ways(self, data):
-        layered, _ = engine.archive_to_pdf(data)
+    @staticmethod
+    def _hung(x, baseline, size, width=200.0):
+        return [x, baseline - 0.8 * size, x + width, baseline + 0.21 * size]
 
-        original = engine._draw_line
+    def test_each_class_has_its_font(self):
+        lines = [{"b": self._hung(20, 30 + 20 * i, 10), "s": [{"t": "Mesure", "sz": 10, "fa": fa}]}
+                 for i, fa in enumerate(("s", "t", "m", "c", "x"))]
+        fonts = [span[0] for span in self._spans(self._rebuild(lines))]
+        for font, family in zip(fonts, ("Helvetica", "Times", "Courier", "Carlito", "Helvetica")):
+            self.assertIn(family, font)
 
-        def per_run(page, line, layer=None):
-            return original(page, line, None)
+    def test_styles(self):
+        lines = [{"b": self._hung(20, 30 + 20 * i, 10), "s": [{"t": "Mesure", "sz": 10, "fa": "c", "f": f}]}
+                 for i, f in enumerate(("R", "B", "I", "BI"))]
+        fonts = [span[0].replace(" ", "").replace("-", "") for span in self._spans(self._rebuild(lines))]
+        self.assertEqual(fonts, ["CarlitoRegular", "CarlitoBold", "CarlitoItalic",
+                                 "CarlitoBoldItalic"])
 
-        engine._draw_line = per_run
+    def test_text_sits_on_its_baseline(self):
+        for size in (5, 9, 24):
+            with self.subTest(size=size):
+                spans = self._spans(self._rebuild(
+                    [{"b": self._hung(20.5, 100, size), "s": [{"t": "Hauteur", "sz": size}]}]))
+                self.assertAlmostEqual(spans[0][2][0], 20.5, delta=0.01)
+                self.assertAlmostEqual(spans[0][2][1], 100, delta=0.01)
+
+    def test_boxes_from_older_encoders(self):
+        # Opened to the page corner, 2.4 and 2.5: 0.8 em below the top, as the
+        # decoders of the day did. A font's own box, from anything older:
+        # 0.21 em above the bottom when it is hardly taller than an em, at
+        # 0.776 of its height when it is a Helvetica box as MuPDF measures it.
+        cases = (([20, 50, 300, 200], 50 + 8),
+                 ([20, 50, 120, 60.5], 60.5 - 2.1),
+                 ([20, 50, 120, 63.75], 50 + 0.776 * 13.75))
+        for box, baseline in cases:
+            with self.subTest(box=box):
+                spans = self._spans(self._rebuild([{"b": box, "s": [{"t": "Ancien", "sz": 10}]}],
+                                                  hung=False))
+                self.assertAlmostEqual(spans[0][2][1], baseline, delta=0.01)
+
+    def test_a_span_too_wide_for_its_box_is_set_smaller(self):
+        text = "Situation générale"
+        natural = fitz.Font("helv").text_length(text, fontsize=10)
+        spans = self._spans(self._rebuild(
+            [{"b": self._hung(20, 50, 10, natural * 0.8), "s": [{"t": text, "sz": 10}]}]))
+        self.assertAlmostEqual(spans[0][1], 8.0, delta=0.05)
+        self.assertAlmostEqual(spans[0][2][1], 50, delta=0.01)
+
+    def test_nothing_is_dropped_however_narrow_the_box(self):
+        # The HTML layout drew nothing when a run did not fit at half size.
+        text = "Texte bien trop long pour sa boite"
+        spans = self._spans(self._rebuild([{"b": self._hung(20, 50, 10, 30), "s": [{"t": text, "sz": 10}]}]))
+        self.assertEqual("".join(span[3] for span in spans), text)
+        self.assertAlmostEqual(spans[0][1], 5.0, delta=0.01)
+
+    def test_a_justified_line_reaches_its_box(self):
+        text = "un deux trois quatre cinq"
+        natural = fitz.Font("helv").text_length(text, fontsize=10)
+        pdf = self._rebuild([{"b": self._hung(20, 50, 10, natural + 12), "s": [{"t": text, "sz": 10}]}])
+        doc = fitz.open(stream=pdf, filetype="pdf")
         try:
-            direct, _ = engine.archive_to_pdf(data)
+            words = doc[0].get_text("words")
         finally:
-            engine._draw_line = original
-        return layered, direct
+            doc.close()
+        self.assertEqual([w[4] for w in words], text.split())
+        self.assertAlmostEqual(words[0][0], 20, delta=0.3)
+        self.assertAlmostEqual(words[-1][2], 20 + natural + 12, delta=0.3)
+        # Four spaces, three points more each.
+        self.assertAlmostEqual(words[1][0] - words[0][2], 2.78 + 3, delta=0.1)
 
-    def test_layer_places_text_exactly_like_insert_htmlbox(self):
-        for source in (self.report, self.table):
-            with self.subTest(source=os.path.basename(source)):
-                data, _ = engine.pdf_to_archive(source, quality="medium")
-                layered, direct = self._rebuild_both_ways(data)
-
-                pages_a, pages_b = self._words(layered), self._words(direct)
-                self.assertEqual(len(pages_a), len(pages_b))
-                compared = 0
-                for words_a, words_b in zip(pages_a, pages_b):
-                    self.assertEqual(len(words_a), len(words_b))
-                    for wa, wb in zip(words_a, words_b):
-                        self.assertEqual(wa[4], wb[4])
-                        for i in range(4):
-                            # Floating-point noise from composing the
-                            # matrices differently; a hundredth of a point
-                            # is far below anything a viewer can show.
-                            self.assertAlmostEqual(wa[i], wb[i], delta=0.01)
-                        compared += 1
-                self.assertGreater(compared, 50)
-
-    def test_layer_embeds_fonts_once_per_page(self):
-        # One form XObject per page instead of one per run: the object count
-        # no longer grows with the number of lines. This is what keeps the
-        # save fast and the file small.
-        data, _ = engine.pdf_to_archive(self.table, quality="medium")
-        layered, direct = self._rebuild_both_ways(data)
-        doc_a = fitz.open(stream=layered, filetype="pdf")
-        doc_b = fitz.open(stream=direct, filetype="pdf")
+    def test_a_word_split_across_spans_stays_whole(self):
+        # A link and the full stop after it, two spans touching in the source.
+        pdf = self._rebuild([{"b": self._hung(20, 50, 10, 120), "s": [
+            {"t": "www.7-zip.org/", "sz": 10, "b": self._hung(20, 50, 10, 60)},
+            {"t": ".", "sz": 10, "b": self._hung(80.4, 50, 10, 2.8)}]}])
+        doc = fitz.open(stream=pdf, filetype="pdf")
         try:
-            self.assertLess(doc_a.xref_length() * 4, doc_b.xref_length())
-            self.assertLess(len(layered), len(direct))
+            self.assertEqual([w[4] for w in doc[0].get_text("words")], ["www.7-zip.org/."])
         finally:
-            doc_a.close()
-            doc_b.close()
+            doc.close()
+
+    def test_text_reads_back_in_its_order_whatever_its_colours(self):
+        # A writer per colour for the whole page put a blue link after all
+        # the black text around it, its full stop apart.
+        lines = [
+            {"b": self._hung(20, 50, 10, 260), "s": [
+                {"t": "Téléchargez-le sur ", "sz": 10, "b": self._hung(20, 50, 10, 92)},
+                {"t": "https://www.7-zip.org/", "sz": 10, "c": 0x0563C1,
+                 "b": self._hung(112, 50, 10, 105)},
+                {"t": ".", "sz": 10, "b": self._hung(217.2, 50, 10, 2.8)}]},
+            {"b": self._hung(20, 70, 10, 100), "s": [{"t": "Ligne suivante", "sz": 10}]},
+        ]
+        doc = fitz.open(stream=self._rebuild(lines), filetype="pdf")
+        try:
+            words = [w[4] for w in doc[0].get_text("words")]
+        finally:
+            doc.close()
+        self.assertEqual(words, ["Téléchargez-le", "sur", "https://www.7-zip.org/.", "Ligne",
+                                 "suivante"])
+
+    def test_spaces_are_glyphs(self):
+        # MuPDF reads no space from a mere gap after "→": the space must be
+        # there as a character for the text to read back.
+        pdf = self._rebuild([{"b": self._hung(20, 50, 10, 200), "s": [
+            {"t": "Message → ", "sz": 10, "fa": "c", "b": self._hung(20, 50, 10, 62)},
+            {"t": "Attachment", "sz": 10, "fa": "c", "f": "B", "b": self._hung(82, 50, 10, 50)}]}])
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        try:
+            self.assertEqual([w[4] for w in doc[0].get_text("words")],
+                             ["Message", "→", "Attachment"])
+        finally:
+            doc.close()
+
+    def test_arabic_is_shaped_and_set_right_to_left(self):
+        # A text writer sets each letter on its own: Arabic came out unjoined.
+        # Shaped by MuPDF's HTML layout instead, from the box's right edge.
+        pdf = self._rebuild([{"b": self._hung(20, 50, 14, 150), "s": [{"t": "مرحبا بكم", "sz": 14}]}])
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        try:
+            spans = [span for block in doc[0].get_text("dict")["blocks"]
+                     for line in block.get("lines", []) for span in line["spans"]
+                     if span["text"].strip()]
+        finally:
+            doc.close()
+        self.assertTrue(spans)
+        self.assertTrue(all("Arabic" in span["font"] for span in spans))
+        # Joined letters are their contextual forms; isolated ones would not be.
+        text = "".join(span["text"] for span in spans)
+        self.assertTrue(any(0xFE70 <= ord(c) <= 0xFEFF for c in text) or "مرحبا" in text)
+        self.assertGreater(max(span["bbox"][2] for span in spans), 160)
+
+    def test_fonts_are_subset(self):
+        # Carlito whole is 600 to 800 KB a style.
+        lines = [{"b": self._hung(20, 30 + 20 * i, 10), "s": [{"t": "Mesure", "sz": 10, "fa": "c", "f": f}]}
+                 for i, f in enumerate(("R", "B", "I", "BI"))]
+        self.assertLess(len(self._rebuild(lines)), 150_000)
+
+    def test_a_missing_font_file_falls_back(self):
+        from unittest import mock
+
+        with mock.patch.object(engine, "resource_path", return_value="/nonexistent/x.ttf"):
+            spans = self._spans(self._rebuild(
+                [{"b": self._hung(20, 50, 10), "s": [{"t": "Calibri", "sz": 10, "fa": "c"}]}]))
+        self.assertIn("Helvetica", spans[0][0])
+
+
+class TestGlyphWidths(unittest.TestCase):
+    """Every glyph where the layout put it, the last of a long line included.
+
+    MuPDF writes a font's widths cut down to whole thousandths of an em, and
+    a reader places glyphs by them: a line of Carlito, 2048 units to the em,
+    ended a few tenths of a point short.
+    """
+
+    TEXT = ("Ultra Low (~5%, urgence Packet 1200), Low (~10%, Packet 9600/VARA HF "
+            "lent), Medium")
+
+    def _last_origin(self, pdf):
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        try:
+            chars = [c for block in doc[0].get_text("rawdict")["blocks"]
+                     for line in block.get("lines", []) for span in line["spans"]
+                     for c in span["chars"]]
+        finally:
+            doc.close()
+        return chars[-1]["origin"][0]
+
+    def test_a_long_line_ends_where_it_was_set(self):
+        font = engine._Fonts().get("c", "R")
+        expected = 20 + font.text_length(self.TEXT[:-1], fontsize=11)
+        pdf = TestTextPlacement._rebuild([{"b": TestTextPlacement._hung(20, 50, 11, 600),
+                                           "s": [{"t": self.TEXT, "sz": 11, "fa": "c"}]}],
+                                         size=(700, 100))
+        # MuPDF reads each width back to the nearest whole thousandth: over
+        # 87 glyphs the roundings mostly cancel. Cut, they added up to 0.4 pt.
+        self.assertAlmostEqual(self._last_origin(pdf), expected, delta=0.1)
+
+    def test_without_the_correction_it_would_not(self):
+        # The test above must be able to fail.
+        from unittest import mock
+
+        font = engine._Fonts().get("c", "R")
+        expected = 20 + font.text_length(self.TEXT[:-1], fontsize=11)
+        with mock.patch.object(engine, "_exact_widths", return_value=0):
+            pdf = TestTextPlacement._rebuild([{"b": TestTextPlacement._hung(20, 50, 11, 600),
+                                               "s": [{"t": self.TEXT, "sz": 11, "fa": "c"}]}],
+                                             size=(700, 100))
+        self.assertLess(self._last_origin(pdf), expected - 0.2)
+
+    def test_widths_arrays_round_trip(self):
+        widths = {0: 600.098, 1: 600.098, 2: 600.098, 3: 500, 5: 229.492, 6: 2, 7: 2, 8: 2, 9: 3}
+        array = engine._format_widths(widths)
+        # Three cids or more of one width in a row make a range.
+        self.assertIn("0 2 600.098", array)
+        self.assertIn("6 8 2", array)
+        self.assertEqual(engine._parse_widths(array.encode()), {k: float(v) for k, v in widths.items()})
+        self.assertEqual(engine._parse_widths(b"[ 0 [ 506 0 226 ] 3 4 578 ]"),
+                         {0: 506.0, 1: 0.0, 2: 226.0, 3: 578.0, 4: 578.0})
+        with self.assertRaises(ValueError):
+            engine._parse_widths(b"[ 0 4 ]")
+
+    def test_only_sfnt_programs_are_read(self):
+        with open(engine.resource_path("psditool", "fonts", "Carlito-Regular.ttf"), "rb") as handle:
+            upem, advances, glyphs = engine._sfnt_advances(handle.read())
+        self.assertEqual(upem, 2048)
+        self.assertGreaterEqual(glyphs, len(advances))
+        # A bare CFF program, as MuPDF embeds its base fonts, has no metrics.
+        self.assertIsNone(engine._sfnt_advances(b"\x01\x00\x04\x02" + bytes(64)))
+        self.assertIsNone(engine._sfnt_advances(b"OTTO\x00\x00"))
+
+
+class TestHungBoxes(unittest.TestCase):
+    """Text boxes hung from the baseline, readable the same by every decoder.
+
+    The original's 2.1.0 and this program up to 2.5 set a line 0.8 em below
+    the top of its box; the original's 2.2 sets it 0.21 em above the bottom.
+    A box from 0.8 em above the baseline to 0.21 em below satisfies both, and
+    the bottom never opens to the page corner: 2.2 put every such line at
+    the foot of the page.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.pdf = os.path.join(cls._tmp.name, "lines.pdf")
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=200)
+        page.insert_text((20, 50), "Titre", fontname="hebo", fontsize=16)
+        # Two spans on one line, the first ending on the space between them.
+        page.insert_text((20, 80), "Nombre de ", fontname="helv", fontsize=10)
+        x = 20 + fitz.Font("helv").text_length("Nombre de ", fontsize=10)
+        page.insert_text((x, 80), "personnes", fontname="hebo", fontsize=10)
+        doc.save(cls.pdf)
+        doc.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _lines(self, quality="medium"):
+        archive, _ = engine.pdf_to_archive(self.pdf, quality=quality)
+        manifest = psdi.read_struct(archive).manifest
+        return manifest, manifest["pages"][0]["tb"][0]["l"]
+
+    def test_boxes_hang_from_the_baseline(self):
+        manifest, lines = self._lines()
+        self.assertEqual(manifest["tl"], engine._TEXT_LAYOUT)
+        self.assertEqual(lines[0]["b"][1], 50 - 12.8)
+        self.assertEqual(lines[0]["b"][3], round(50 + 0.21 * 16, 1))
+        for span in lines[1]["s"]:
+            self.assertEqual(span["b"][1], 72.0)
+            self.assertEqual(span["b"][3], 82.1)
+
+    def test_a_span_box_takes_in_its_trailing_space(self):
+        _, lines = self._lines()
+        first, second = lines[1]["s"]
+        self.assertEqual(first["t"], "Nombre de ")
+        self.assertAlmostEqual(first["b"][2], second["b"][0], delta=0.15)
+
+    def test_a_line_ends_on_its_last_glyph(self):
+        _, lines = self._lines()
+        self.assertFalse(lines[1]["s"][-1]["t"].endswith(" "))
+        self.assertEqual(lines[1]["b"][2], lines[1]["s"][-1]["b"][2])
+
+    def test_every_decoder_finds_the_baseline(self):
+        for quality in ("ultra_low", "medium"):
+            with self.subTest(quality=quality):
+                archive, _ = engine.pdf_to_archive(self.pdf, quality=quality)
+                doc = fitz.open(stream=engine.archive_to_pdf(archive)[0], filetype="pdf")
+                try:
+                    origins = [span["chars"][0]["origin"][1]
+                               for block in doc[0].get_text("rawdict")["blocks"]
+                               for line in block.get("lines", []) for span in line["spans"]]
+                finally:
+                    doc.close()
+                for found, wanted in zip(origins, (50, 80, 80)):
+                    self.assertAlmostEqual(found, wanted, delta=0.3 if quality == "ultra_low" else 0.06)
+
+
+class TestFontClasses(unittest.TestCase):
+    """The class a span's font is set in, from every clue the PDF gives."""
+
+    def test_names(self):
+        cases = {
+            "Calibri": "c", "Calibri-Bold": "c", "Carlito": "c", "Calibri Light": "c",
+            "ArialMT": "s", "Helvetica": "s", "Microsoft Sans Serif": "s", "DejaVu Sans": "s",
+            "Times New Roman": "t", "TimesNewRomanPSMT": "t", "Cambria": "t", "CMR10": "t",
+            "NimbusRomNo9L-Regu": "t", "Georgia": "t",
+            "Courier New": "m", "Consolas": "m", "Lucida Console": "m", "CMTT9": "m",
+            "LiberationMono": "m", "Monotype Corsiva": "s",
+        }
+        for name, family in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(engine._classify_font(name)[1], family)
+
+    def test_flags_give_the_style_the_name_hides(self):
+        span = {"font": "CIDFont+F2", "flags": fitz.TEXT_FONT_BOLD | fitz.TEXT_FONT_ITALIC}
+        self.assertEqual(engine._classify_span_font(span, {}), ("BI", "s"))
+        span = {"font": "CIDFont+F3", "flags": fitz.TEXT_FONT_MONOSPACED}
+        self.assertEqual(engine._classify_span_font(span, {}), ("R", "m"))
+
+    def test_a_placeholder_name_is_read_from_the_font_program(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = fixtures.placeholder_font_names(
+                os.path.join(directory, "printed.pdf"),
+                engine.resource_path("psditool", "fonts", "Carlito-Bold.ttf"))
+            archive, _ = engine.pdf_to_archive(path, quality="medium")
+        spans = [line["s"][0] for line in psdi.read_struct(archive).manifest["pages"][0]["tb"][0]["l"]]
+        self.assertEqual((spans[0].get("f"), spans[0].get("fa")), ("B", "c"))
+        self.assertEqual((spans[1].get("f", "R"), spans[1].get("fa", "s")), ("R", "s"))
+
+
+class TestSymbolFonts(unittest.TestCase):
+    """Symbol's and Wingdings' codes, as the characters they draw."""
+
+    def test_tables(self):
+        from psditool.symbols import translation_for
+
+        self.assertEqual(" ".translate(translation_for("SymbolMT")), "• °")
+        self.assertEqual("".translate(translation_for("Wingdings Regular")), "➢→✓")
+        self.assertEqual("".translate(translation_for("ABCDEF+Symbol")), "•")
+        for name in ("Wingdings 2", "Wingdings3", "Segoe UI Symbol", "Calibri"):
+            with self.subTest(name=name):
+                self.assertIsNone(translation_for(name))
+
+    def test_only_private_codes_change(self):
+        from psditool.symbols import translation_for
+
+        self.assertEqual("Abc 12".translate(translation_for("Symbol")), "Abc 12")
+
+    def test_a_bullet_keeps_the_space_after_it(self):
+        # Word sets a list's bullet a tab's width before its text, with a
+        # typed space between, in a font of its own. MuPDF guesses no space
+        # after "➢" or "→": without the typed one the rebuilt page read
+        # "➢le", in every decoder.
+        previous = {"t": "➢", "b": [81.8, 0, 91.4, 0]}
+        engine._restore_space(previous, "le", [99.2, 0, 140, 0], 11)
+        self.assertEqual(previous["t"], "➢ ")
+        # After a letter MuPDF guesses the space itself: spans far apart stay
+        # as they were.
+        previous = {"t": "Total", "b": [20, 0, 50, 0]}
+        engine._restore_space(previous, "128", [90, 0, 110, 0], 11)
+        self.assertEqual(previous["t"], "Total")
+
+    def test_bullet_and_text_read_back_apart(self):
+        carlito = engine.resource_path("psditool", "fonts", "Carlito-Regular.ttf")
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "bullets.pdf")
+            doc = fitz.open()
+            page = doc.new_page(width=300, height=120)
+            page.insert_font(fontname="carlito", fontfile=carlito)
+            for row, word in enumerate(("Alimentation", "Circulation")):
+                # The arrow ends at 50; the word starts 0.7 em further on, as
+                # in a Word list.
+                y = 40 + 20 * row
+                page.insert_text((40, y), "→", fontname="carlito", fontsize=11)
+                page.insert_text((50.5, y), " ", fontname="helv", fontsize=11)
+                page.insert_text((58, y), word, fontname="carlito", fontsize=11)
+            doc.save(path)
+            doc.close()
+            archive, _ = engine.pdf_to_archive(path, quality="medium")
+        rebuilt = fitz.open(stream=engine.archive_to_pdf(archive)[0], filetype="pdf")
+        try:
+            words = [w[4] for w in rebuilt[0].get_text("words")]
+        finally:
+            rebuilt.close()
+        self.assertEqual(words, ["→", "Alimentation", "→", "Circulation"])
 
 
 class TestVectorArtwork(unittest.TestCase):
@@ -1272,9 +1644,10 @@ class TestColumnPositions(unittest.TestCase):
                 for line in block.get("lines", []):
                     for span in line["spans"]:
                         runs = engine._split_span_runs(span)
-                        for text, box in runs:
+                        for text, box, baseline in runs:
                             self.assertTrue(text.strip())
                             self.assertEqual(len(box), 4)
+                            self.assertAlmostEqual(baseline, span["origin"][1], delta=0.01)
         finally:
             doc.close()
 
@@ -1608,6 +1981,231 @@ class TestOverlookedSpaces(unittest.TestCase):
                 finally:
                     doc.close()
                 self.assertEqual(supply.called, expected)
+
+
+class TestClippedDrawings(unittest.TestCase):
+    """What a clip hides stays hidden; thin strips are boxes, not pictures.
+
+    LibreOffice paints double cell borders as three strips a fifth of a point
+    thick and may clip them away entirely. On the FM/SAT situation sheet the
+    strips around one cell came out as a frame nobody had seen -- in the
+    original's 2.2 -- or turned the cell and its text into a 10 KB picture,
+    here: the archive was twice the size it is now.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.pdf = fixtures.clipped_borders(os.path.join(cls._tmp.name, "clipped.pdf"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _manifest(self, quality="medium"):
+        archive, _ = engine.pdf_to_archive(self.pdf, quality=quality)
+        return archive, psdi.read_struct(archive).manifest
+
+    def test_thin_strips_are_rectangles(self):
+        strip = [(37.698, 146.636), (37.875, 146.636), (37.875, 147.189),
+                 (37.698, 147.189), (37.698, 146.636)]
+        self.assertTrue(engine._is_axis_aligned_rectangle(strip))
+        # Three segments, closed by the fill: the last corner is not the first.
+        self.assertTrue(engine._is_axis_aligned_rectangle(
+            [(0, 0), (0.2, 0), (0.2, 0.6), (0, 0.6)]))
+
+    def test_short_sides_must_still_run_straight(self):
+        self.assertFalse(engine._is_axis_aligned_rectangle(
+            [(0, 0), (0.2, 0.1), (0.4, 0), (0.2, -0.1)]))
+        self.assertFalse(engine._is_axis_aligned_rectangle(
+            [(0, 0), (0, 0), (0.2, 0), (0.2, 0.6)]))
+
+    def test_segments_are_cut_to_the_clip(self):
+        clip = (10, 10, 20, 20)
+        self.assertEqual(engine._clip_segment(0, 15, 30, 15, clip), (10, 15, 20, 15))
+        self.assertIsNone(engine._clip_segment(0, 25, 30, 25, clip))
+        self.assertIsNone(engine._clip_segment(0, 0, 5, 30, clip))
+        x0, y0, x1, y1 = engine._clip_segment(0, 0, 30, 30, clip)
+        self.assertAlmostEqual(x0, 10)
+        self.assertAlmostEqual(y1, 20)
+
+    def test_the_fixture_reproduces_the_defect(self):
+        doc = fitz.open(self.pdf)
+        try:
+            page = doc[0]
+            self.assertEqual(len(page.get_drawings()), 15)
+            hidden = [d for d in page.get_drawings() if fitz.Rect(d["rect"]).y1 < 300
+                      and d["type"] == "f" and d["fill"] == (0.0, 0.0, 0.0)]
+            self.assertTrue(hidden, "the hidden strips must be listed")
+            self.assertEqual(len(engine._visible_drawings(page)), 6)
+        finally:
+            doc.close()
+
+    def test_hidden_strips_leave_no_trace(self):
+        for quality in QUALITY_ORDER:
+            with self.subTest(quality=quality):
+                archive, manifest = self._manifest(quality)
+                page = manifest["pages"][0]
+                self.assertEqual(manifest["images"], {})
+                self.assertEqual(page["ir"], [])
+                for entry in page["dr"]:
+                    x0, y0, x1, y1 = entry["r"]
+                    self.assertFalse(185 < y0 < 290 and x0 < 300, entry)
+                text = [span["t"] for block in page["tb"] for line in block["l"]
+                        for span in line["s"]]
+                self.assertEqual(text, ["Commentaires du jour",
+                                        "Texte sous les bordures cachees"])
+
+    def test_shown_strips_are_kept_as_boxes(self):
+        _, manifest = self._manifest("medium")
+        strips = sorted((e["r"][1], e.get("f")) for e in manifest["pages"][0]["dr"]
+                        if e["r"][0] == 60 and 341 <= e["r"][1] <= 342)
+        self.assertEqual(strips, [(341.4, "#000000"), (341.6, "#ffffff"), (341.8, "#000000")])
+
+    def test_a_fill_is_cut_down_to_its_clip(self):
+        _, manifest = self._manifest("medium")
+        greys = [e["r"] for e in manifest["pages"][0]["dr"] if e.get("f") == "#cccccc"]
+        self.assertEqual(greys, [[320.0, 142.0, 400.0, 242.0]])
+
+    def test_a_stroke_crossing_its_clip_is_cut_into_rules(self):
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=300)
+        xref = doc.get_new_xref()
+        doc.update_object(xref, "<<>>")
+        # A frame 100 pt wide whose clip shows only its left half.
+        doc.update_stream(xref, b"q 0 0 150 300 re W n 0 0 0 RG 1 w 100 100 100 50 re S Q")
+        doc.xref_set_key(page.xref, "Contents", f"{xref} 0 R")
+        try:
+            rules = engine._extract_page(doc[0], 0, {})["dr"]
+        finally:
+            doc.close()
+        self.assertTrue(rules)
+        for entry in rules:
+            x0, y0, x1, y1 = entry["r"]
+            self.assertEqual(entry["c"], "#000000")
+            self.assertTrue(x0 == x1 or y0 == y1, entry)   # rules only
+            self.assertLessEqual(max(x0, x1), 150.5, entry)
+
+    def test_the_rebuild_shows_what_the_original_shows(self):
+        archive, _ = self._manifest("medium")
+        rebuilt, _ = engine.archive_to_pdf(archive)
+
+        def grey(source, x, y):
+            doc = fitz.open(stream=source, filetype="pdf") if isinstance(source, bytes) \
+                else fitz.open(source)
+            try:
+                pix = doc[0].get_pixmap(dpi=144, colorspace=fitz.csGRAY)
+                return pix.pixel(int(x * 2), int(y * 2))[0]
+            finally:
+                doc.close()
+
+        for x, y, dark in ((100, 191.7, False),   # a hidden strip
+                           (50.3, 230, False),    # another
+                           (100, 341.7, True),    # a shown double rule
+                           (500, 342, True),      # the rule under the clipped fill
+                           (500, 300, False)):    # outside the fill's clip
+            with self.subTest(x=x, y=y):
+                self.assertEqual(grey(self.pdf, x, y) < 200, dark)
+                self.assertEqual(grey(rebuilt, x, y) < 200, dark)
+
+
+class TestLinesWithPoints(unittest.TestCase):
+    """Reading the "line" entries version 2.2 of the original program writes.
+
+    Every stroke it writes is {"t": "line", "p": [x0, y0, x1, y1, ...]}. This
+    reader looked for "r" and stopped on the first one with a KeyError: no
+    archive from a station on that version could be opened.
+    """
+
+    @staticmethod
+    def _archive(entries):
+        manifest = {"v": "1.0.6", "src": "lines.pdf", "images": {},
+                    "page_sizes": [{"w": 300.0, "h": 300.0}],
+                    "pages": [{"pn": 1, "tb": [], "ir": [], "ck": [], "dr": entries}]}
+        return psdi.write_struct(manifest, {}, 6)
+
+    @staticmethod
+    def _strokes(pdf):
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        try:
+            return [(round(d["width"], 2), d["color"],
+                     [(round(i[1].x), round(i[1].y), round(i[2].x), round(i[2].y))
+                      for i in d["items"] if i[0] == "l"])
+                    for d in doc[0].get_drawings()]
+        finally:
+            doc.close()
+
+    def test_lines_and_polylines_are_drawn(self):
+        pdf, _ = engine.archive_to_pdf(self._archive([
+            {"t": "line", "p": [10, 10, 200, 10], "c": "#000000"},
+            {"t": "line", "p": [10, 30, 200, 30], "c": "#ff0000", "w": 0.7},
+            {"t": "line", "p": [10, 50, 100, 90, 200, 50]},
+            {"t": "line", "p": [[10, 120], [200, 120]], "w": 2},
+        ]))
+        self.assertEqual(self._strokes(pdf), [
+            (0.5, (0.0, 0.0, 0.0), [(10, 10, 200, 10)]),
+            (0.7, (1.0, 0.0, 0.0), [(10, 30, 200, 30)]),
+            (0.5, (0.0, 0.0, 0.0), [(10, 50, 100, 90), (100, 90, 200, 50)]),
+            (2.0, (0.0, 0.0, 0.0), [(10, 120, 200, 120)]),
+        ])
+
+    def test_lines_with_two_ends_still_read(self):
+        pdf, _ = engine.archive_to_pdf(self._archive([
+            {"t": "line", "r": [10, 10, 200, 10], "w": 0.1}]))
+        self.assertEqual(self._strokes(pdf), [(0.3, (0.0, 0.0, 0.0), [(10, 10, 200, 10)])])
+
+    def test_malformed_entries_cost_themselves_only(self):
+        pdf, _ = engine.archive_to_pdf(self._archive([
+            {"t": "line"},
+            {"t": "line", "p": "10 10 200 10"},
+            {"t": "line", "p": [10, "a", 200, 10]},
+            {"t": "line", "p": [10, 10]},
+            {"t": "line", "p": [10, 10, 200, 10], "w": "thick"},
+        ]))
+        self.assertEqual(self._strokes(pdf), [(0.5, (0.0, 0.0, 0.0), [(10, 10, 200, 10)])])
+
+
+class TestForeignEntries(unittest.TestCase):
+    """Whatever another program writes into a page, the rest of it is drawn.
+
+    The rebuild stopped on the first entry it could not read -- a KeyError,
+    a TypeError -- where a reader of the format should skip what it cannot
+    draw, as it skips the keys it does not know.
+    """
+
+    def test_every_list_of_a_page_tolerates_strangers(self):
+        good_line = {"b": [20, 40, 200, 52], "s": [{"t": "Lisible", "sz": 10}]}
+        cases = {
+            "dr": [{"t": "rect"}, {"t": "rect", "r": "abc"}, "oops", 5, None,
+                   {"t": "rect", "r": [0, 0, 5, 5], "w": "x", "c": 5, "f": [1]}],
+            "ir": [{"b": [0, 0, 10, 10]}, {"x": "5"}, 5, {"x": [1], "b": [0, 0, 9, 9]}],
+            "ck": [[1, 2], 5, "x"],
+            "lk": [{"b": "x", "u": 3}, "x", {"b": [0, 0, 5, 5]}],
+            "tb": ["x", {"l": "x"}, {"l": ["x", {"b": [0, 0, 1]},
+                                            {"b": [20, 60, 200, 72], "s": [
+                                                {"t": 5}, "x",
+                                                {"t": "Style", "sz": "big", "c": "red",
+                                                 "fa": [3], "f": {"a": 1}}]}]}],
+        }
+        for key, value in cases.items():
+            with self.subTest(key=key):
+                page = {"pn": 1, "tb": [{"l": [good_line]}], "ir": [], "dr": [], "ck": []}
+                page[key] = value if key != "tb" else value + page["tb"]
+                manifest = {"v": "1.0.6", "src": "x.pdf", "images": {},
+                            "page_sizes": [{"w": 300, "h": 200}], "pages": [page]}
+                pdf, _ = engine.archive_to_pdf(psdi.write_struct(manifest, {}, 6))
+                doc = fitz.open(stream=pdf, filetype="pdf")
+                try:
+                    self.assertIn("Lisible", doc[0].get_text())
+                finally:
+                    doc.close()
+        # And a list that is not one.
+        for key in ("dr", "ir", "ck", "lk", "tb"):
+            with self.subTest(key=key, shape="scalar"):
+                page = {"pn": 1, "tb": [], "ir": [], "dr": [], "ck": [], key: 5}
+                manifest = {"v": "1.0.6", "src": "x.pdf", "images": {},
+                            "page_sizes": [{"w": 300, "h": 200}], "pages": [page]}
+                engine.archive_to_pdf(psdi.write_struct(manifest, {}, 6))
 
 
 class TestMissingToUnicode(unittest.TestCase):

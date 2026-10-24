@@ -14,7 +14,7 @@
 ; PyInstaller. build.cmd in the project root does both steps in order.
 
 #define AppName        "PDF Teleporter"
-#define AppVersion     "2.5.0"
+#define AppVersion     "2.6.0"
 #define AppPublisher   "The PDF Teleporter contributors"
 #define AppURL         "https://github.com/F4JTV/PDFteleporter-v2"
 #define AppExeName     "PDFteleporter.exe"
