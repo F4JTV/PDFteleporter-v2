@@ -566,6 +566,20 @@ _SCALES = (1, 10, 100)
 _INLINE_SPANS = 15
 # Ten bytes of seven bits hold any 64-bit value; a longer varint is damage.
 _MAX_VARINT_BYTES = 10
+# A manifest's "tl" when its text boxes hang from the baseline (see the
+# engine's _TEXT_LAYOUT): a line's box then runs from 0.8 em above its
+# baseline to 0.21 em below, 1.01 em of its largest text tall.
+_HUNG_LAYOUT = 1
+_HUNG_HEIGHT_EM = 1.01
+
+
+def _hung_height(spans, scale: int) -> int:
+    """The height, in units of 1/scale point, of a line hung from its baseline."""
+    size = max((span.get("sz", 8) for span in spans if isinstance(span, dict)),
+               default=8)
+    if not _is_number(size):
+        raise _Unsupported("span size")
+    return round(_HUNG_HEIGHT_EM * size * scale)
 
 
 class _Unsupported(Exception):
@@ -643,6 +657,8 @@ class _ColumnWriter:
         self.span_styles: dict[tuple, int] = {}
         self.draw_styles: dict[tuple, int] = {}
         self.string_refs: set[bool] = set()
+        self.hung = False
+        self.page_heights: list = []
 
     def coord(self, value) -> int:
         if not _is_number(value):
@@ -685,7 +701,7 @@ class _ColumnWriter:
                 raise _Unsupported("page number")
             head.s(number - (index + 1))
         if "tb" in page:
-            self.text_blocks(page["tb"])
+            self.text_blocks(page["tb"], self._page_bottom(page.get("pn")))
         if "ir" in page:
             refs = page["ir"]
             head.u(len(refs))
@@ -723,7 +739,19 @@ class _ColumnWriter:
                     self.out["extras"].s(value)
                 self.string(link["u"])
 
-    def text_blocks(self, blocks: list) -> None:
+    def _page_bottom(self, number) -> int | None:
+        """The page's height in units, where a hung line's bottom may travel."""
+        if not self.hung or not isinstance(number, int) or isinstance(number, bool):
+            return None
+        if not 1 <= number <= len(self.page_heights):
+            return None
+        height = self.page_heights[number - 1]
+        return self.coord_round(height) if _is_number(height) else None
+
+    def coord_round(self, value) -> int:
+        return round(value * self.scale)
+
+    def text_blocks(self, blocks: list, bottom: int | None = None) -> None:
         head = self.out["pages"]
         head.u(len(blocks))
         lines_of = []
@@ -732,16 +760,28 @@ class _ColumnWriter:
                 raise _Unsupported("text block")
             lines_of.append(block["l"])
 
-        # A line that fits at full size keeps its box open to the page corner
-        # (see the engine's _open_line_box), so most lines of a page share
-        # one bottom-right corner: stored once per page, then one flag bit.
+        # A line that fits at full size keeps its box open to the page's
+        # right edge (see the engine's _open_line_box), so most lines of a
+        # page share one right edge, and up to 2.5 one bottom-right corner:
+        # stored once per page, then one flag bit. From 2.6 a line's bottom
+        # hangs 1.01 em below its top instead (see _HUNG_HEIGHT_EM): such a
+        # line travels with the page's bottom as its own -- which a 2.5
+        # reader takes for an opened box, and sets just as well -- and its
+        # bottom is worked out again on reading. A line whose bottom really
+        # is the page's is never given the flag, so the reading is exact.
+        boxes = {}
         corners = Counter()
         for lines in lines_of:
             for line in lines:
                 if not isinstance(line, dict) or set(line) != {"b", "s"}:
                     raise _Unsupported("line")
                 box = self.box(line["b"])
-                corners[(box[2], box[3])] += 1
+                key = (box[2], box[3])
+                if (bottom is not None and isinstance(line["s"], list)
+                        and box[3] == box[1] + _hung_height(line["s"], self.scale)):
+                    key = (box[2], bottom)
+                boxes[id(line)] = (box, key)
+                corners[key] += 1
         corner = corners.most_common(1)[0][0] if corners else (0, 0)
         head.s(corner[0])
         head.s(corner[1])
@@ -750,11 +790,12 @@ class _ColumnWriter:
         for lines in lines_of:
             head.u(len(lines))
             for line in lines:
-                box = self.box(line["b"])
+                box, key = boxes[id(line)]
                 spans = line["s"]
                 if not isinstance(spans, list):
                     raise _Unsupported("spans")
-                is_open = (box[2], box[3]) == corner
+                is_open = key == corner and not (
+                    bottom is not None and key == (box[2], box[3]) and box[3] == bottom)
                 has_boxes = any(isinstance(span, dict) and "b" in span for span in spans)
                 count = len(spans)
                 self.out["lines"].u(min(count, _INLINE_SPANS) | is_open << 4
@@ -814,6 +855,10 @@ class _ColumnWriter:
         if not isinstance(manifest, dict) or not isinstance(manifest.get("pages"), list):
             raise _Unsupported("manifest")
         pages = manifest["pages"]
+        self.hung = manifest.get("tl") == _HUNG_LAYOUT
+        sizes = manifest.get("page_sizes")
+        self.page_heights = [size.get("h") if isinstance(size, dict) else None
+                             for size in sizes] if isinstance(sizes, list) else []
         for index, page in enumerate(pages):
             self.page(index, page)
         if len(self.string_refs) > 1:
@@ -923,6 +968,8 @@ def _decode_columns(body: bytes) -> dict:
 
     head = streams["pages"]
     extras = streams["extras"]
+    hung = rest.get("tl") == _HUNG_LAYOUT
+    heights = rest.get("page_sizes") if isinstance(rest.get("page_sizes"), list) else []
     pages = []
     for index in range(count):
         mask = head.u()
@@ -935,6 +982,13 @@ def _decode_columns(body: bytes) -> dict:
         if "tb" in present:
             block_count = head.u()
             corner = (head.s(), head.s())
+            # Where a hung line's bottom travels (see text_blocks).
+            bottom = None
+            number = page.get("pn")
+            if hung and isinstance(number, int) and 1 <= number <= len(heights):
+                size = heights[number - 1]
+                if isinstance(size, dict) and _is_number(size.get("h")):
+                    bottom = round(size["h"] * scale)
             x_prev = y_prev = 0
             blocks = []
             for _ in range(block_count):
@@ -966,6 +1020,11 @@ def _decode_columns(body: bytes) -> dict:
                             sy1 = sy0 + streams["sboxes"].s()
                             span["b"] = [coord(v) for v in (sx0, sy0, sx1, sy1)]
                         spans.append(span)
+                    if flags & 0x10 and bottom is not None and y1 == bottom:
+                        try:
+                            y1 = y0 + _hung_height(spans, scale)
+                        except _Unsupported as exc:
+                            raise PsdiError("Compact manifest: malformed span size") from exc
                     lines.append({"b": [coord(v) for v in (x0, y0, x1, y1)],
                                   "s": spans})
                 blocks.append({"l": lines})

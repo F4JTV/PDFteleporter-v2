@@ -31,8 +31,10 @@ import io
 import logging
 import math
 import os
+import re
 import statistics
 import time
+import unicodedata
 from collections.abc import Callable
 
 try:
@@ -58,6 +60,8 @@ from PIL import Image, ImageChops, ImageMath, features as _pil_features
 
 from . import format as psdi
 from .presets import QUALITY_MEDIUM, QUALITY_PRESETS, estimate_times
+from .resources import resource_path
+from .symbols import translation_for
 
 log = logging.getLogger(__name__)
 
@@ -86,10 +90,17 @@ _LIGATURES = {
     "\u01a9": "tt",  # ... and for "tt"
 }
 
-_MONO_HINTS = ("courier", "mono", "consolas", "menlo", "cour")
+_MONO_HINTS = ("courier", "mono", "consolas", "menlo", "cour", "lucida console",
+               "lucidaconsole", "cmtt", "inconsolata", "monaco", "andale",
+               "typewriter", "fixedsys", "letter gothic", "lettergothic")
+# Calibri, and Carlito, a free font with its widths. Version 2.2 of the
+# original program gives it a class of its own, "c", set in Carlito; a decoder
+# that predates the class falls back to its sans serif, as it did before.
+_CALIBRI_HINTS = ("calibri", "carlito")
 _SERIF_HINTS = (
     "times",
     "serif",
+    "roman",
     "cambria",
     "georgia",
     "garamond",
@@ -98,26 +109,25 @@ _SERIF_HINTS = (
     "freeserif",
     "dejavu serif",
     "noto serif",
+    "nimbusrom",
+    "cmr", "cmbx", "cmti", "cmsl", "cmmi", "lmroman", "sfrm", "sfbx", "sfti",
+    "book antiqua", "bookantiqua", "palatino", "century", "baskerville",
+    "bookman", "minion", "caslon", "constantia", "charter", "utopia", "didot",
+    "bodoni", "goudy", "stix", "libertin", "crimson", "merriweather", "caladea",
+    "gelasio", "sabon", "perpetua", "cochin", "plantin",
 )
-
-_FAMILY_CSS = {
-    "s": "Helvetica, Arial, sans-serif",
-    "t": "'Times New Roman', Times, serif",
-    "m": "'Courier New', Courier, monospace",
-}
-
-_FONT_FALLBACK = {"R": "helv", "B": "hebo", "I": "heit", "BI": "hebi"}
+# A PDF name that says nothing of its font: Microsoft Print to PDF calls every
+# font of a document "CIDFont+F1", "CIDFont+F2"... The font program inside
+# still carries the real name, Calibri or Times New Roman.
+_PLACEHOLDER_FONT = re.compile(r"(?:CIDFont\+)?(?:F|T|TT|C|R|Font)?\d+(?:_\d+)?",
+                               re.IGNORECASE)
+_SUBSET_TAG = re.compile(r"[A-Z]{6}\+")
 
 # Span keys whose value the rebuild side already supplies as a default. Storing
 # them explicitly costs bytes on every span for no gain, and omitting them is
 # safe for any decoder that reads the manifest with .get(key, default) --
 # which is what the format has always required.
 _SPAN_DEFAULTS = {"f": "R", "fa": "s", "c": 0}
-
-_HTML_BASE_CSS = (
-    "* { margin:0; padding:0; box-sizing:border-box; }"
-    "html, body { margin:0; padding:0; line-height:1; }"
-)
 
 
 def _progress(cb: ProgressFn, step: int, total: int, message: str) -> None:
@@ -211,7 +221,8 @@ def _color_to_hex(color) -> str:
 
 def _hex_to_rgb(hex_color: str):
     """Convert #rrggbb to the 0..1 float triple PyMuPDF expects."""
-    if not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
+    if (not isinstance(hex_color, str) or not hex_color.startswith("#")
+            or len(hex_color) != 7):
         return None
     try:
         return tuple(int(hex_color[i : i + 2], 16) / 255.0 for i in (1, 3, 5))
@@ -319,14 +330,86 @@ def _classify_font(font_name: str) -> tuple[str, str]:
     else:
         key = "R"
 
-    if any(hint in lower for hint in _MONO_HINTS):
+    if any(hint in lower for hint in _MONO_HINTS) and "monotype" not in lower:
         family = "m"
-    elif any(hint in lower for hint in _SERIF_HINTS):
+    elif any(hint in lower for hint in _CALIBRI_HINTS):
+        family = "c"
+    elif "sans" not in lower and any(hint in lower for hint in _SERIF_HINTS):
         family = "t"
     else:
         family = "s"
 
     return key, family
+
+
+def _font_programs(page, cache: dict) -> dict:
+    """The real names of a page's fonts whose PDF name is a placeholder.
+
+    Keyed by the name MuPDF gives their spans; read from the font program
+    itself, once per font of the document (`cache`, by xref).
+    """
+    names: dict = {}
+    for entry in page.get_fonts(full=True):
+        xref, basefont = entry[0], str(entry[3])
+        short = basefont[7:] if _SUBSET_TAG.match(basefont) else basefont
+        if not _PLACEHOLDER_FONT.fullmatch(short):
+            continue
+        if xref not in cache:
+            name = None
+            try:
+                buffer = page.parent.extract_font(xref)[3]
+                if buffer:
+                    name = fitz.Font(fontbuffer=buffer).name
+            except Exception:  # noqa: BLE001
+                log.debug("Font %d could not be read", xref, exc_info=True)
+            cache[xref] = name
+        if cache[xref]:
+            names.setdefault(short, cache[xref])
+            names.setdefault(basefont, cache[xref])
+    return names
+
+
+def _classify_span_font(span: dict, programs: dict) -> tuple[str, str]:
+    """The (style, class) pair of a span's font, from every clue there is.
+
+    The name first, or the program's own where the name is a placeholder;
+    then MuPDF's flags, which read the font's descriptor: a "CIDFont+F2" that
+    is Calibri Bold says so in its flags only.
+    """
+    name = str(span.get("font", ""))
+    real = programs.get(name)
+    key, family = _classify_font(real or name)
+    flags = span.get("flags", 0) or 0
+    bold = "B" in key or bool(flags & fitz.TEXT_FONT_BOLD)
+    italic = "I" in key or bool(flags & fitz.TEXT_FONT_ITALIC)
+    key = "BI" if bold and italic else "B" if bold else "I" if italic else "R"
+    if family == "s" and flags & fitz.TEXT_FONT_MONOSPACED:
+        family = "m"
+    return key, family
+
+
+# A side shorter than the tolerance below still counts when it runs straight.
+# LibreOffice draws a double cell border as three strips a fifth of a point
+# thick -- black, white, black -- each one a closed outline of four segments,
+# and their short sides used to fail the length test: every strip became
+# "artwork", and the whole table around them a picture. A short side has to be
+# all but exactly horizontal or vertical, so a short diagonal still breaks the
+# shape, and a side of no length at all still does.
+_SHORT_SIDE_MAX_SLOPE = 0.1
+_MIN_SIDE = 1e-3
+
+
+def _side_direction(dx: float, dy: float, tolerance: float):
+    """True for a horizontal side, False for a vertical one, else None."""
+    if dy <= tolerance and dx > tolerance:
+        return True
+    if dx <= tolerance and dy > tolerance:
+        return False
+    if _MIN_SIDE < dx <= tolerance and dy <= _SHORT_SIDE_MAX_SLOPE * dx:
+        return True
+    if _MIN_SIDE < dy <= tolerance and dx <= _SHORT_SIDE_MAX_SLOPE * dy:
+        return False
+    return None
 
 
 def _is_axis_aligned_rectangle(points, tolerance: float = 0.6) -> bool:
@@ -342,10 +425,15 @@ def _is_axis_aligned_rectangle(points, tolerance: float = 0.6) -> bool:
     if len(points) < 4:
         return False
 
-    # Drop the closing point when the path returns to its origin.
+    # Drop the closing point when the path returns to its origin. The slack
+    # shrinks with the shape: on a strip a fifth of a point wide, a corner
+    # 0.6 pt from the origin is the opposite corner, not the origin again.
     pts = list(points)
-    if (abs(pts[0][0] - pts[-1][0]) <= tolerance
-            and abs(pts[0][1] - pts[-1][1]) <= tolerance):
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    closing = min(tolerance, (max(xs) - min(xs)) / 4, (max(ys) - min(ys)) / 4)
+    if (abs(pts[0][0] - pts[-1][0]) <= closing
+            and abs(pts[0][1] - pts[-1][1]) <= closing):
         pts = pts[:-1]
     if len(pts) != 4:
         return False
@@ -354,13 +442,10 @@ def _is_axis_aligned_rectangle(points, tolerance: float = 0.6) -> bool:
     for index in range(4):
         x0, y0 = pts[index]
         x1, y1 = pts[(index + 1) % 4]
-        dx, dy = abs(x1 - x0), abs(y1 - y0)
-        if dy <= tolerance and dx > tolerance:
-            horizontal.append(True)
-        elif dx <= tolerance and dy > tolerance:
-            horizontal.append(False)
-        else:
+        direction = _side_direction(abs(x1 - x0), abs(y1 - y0), tolerance)
+        if direction is None:
             return False  # diagonal, or a zero-length side
+        horizontal.append(direction)
 
     # Sides must alternate direction, otherwise it is a zigzag, not a box.
     return horizontal[0] != horizontal[1] and horizontal[1] != horizontal[2] \
@@ -419,6 +504,131 @@ def _rects_from_path_items(items) -> list:
 
     flush()
     return rects
+
+
+# --- clipping ----------------------------------------------------------------
+# A producer may paint more than it shows and let a clipping path hide the
+# rest. LibreOffice does it on every spreadsheet with double cell borders: the
+# border strips are painted inside a clip that excludes them entirely. Drawn
+# as they are listed, they came out as a frame nobody had ever seen -- or, as
+# shapes the encoder could not describe, they turned the table under them
+# into a picture several kilobytes heavy.
+
+# A path spilling out of its clip by less than this is kept whole: the hidden
+# sliver is narrower than a pixel at every preset, and leaving the entry as it
+# was keeps the archive byte for byte what it was where nothing visible changes.
+_CLIP_SLACK = 0.5
+
+
+def _clips_by_seqno(page) -> dict:
+    """The rectangle each vector path of the page is painted through.
+
+    MuPDF's extended listing reports every clipping path with its bounding box
+    -- the "scissor" -- and gives each entry a nesting level: a clip or a
+    transparency group holds everything after it at a deeper level. What a
+    path is painted through is the intersection of the scissors still open
+    above it. A scissor is a bounding box, so the result can only overstate
+    what shows, never hide what does.
+
+    Keyed by the path's sequence number, which the plain listing carries too.
+    A path under no clip has no entry. The rectangle is a plain tuple, and
+    comes out inverted when the clips have nothing in common.
+    """
+    clips: dict = {}
+    open_clips: list = []   # (level, scissor), or (level, None) for a group
+    for item in page.get_drawings(extended=True):
+        level = item.get("level", 0)
+        while open_clips and open_clips[-1][0] >= level:
+            open_clips.pop()
+        kind = item.get("type")
+        if kind == "clip":
+            open_clips.append((level, tuple(item["scissor"])))
+            continue
+        if kind == "group":
+            open_clips.append((level, None))
+            continue
+        scissors = [scissor for _, scissor in open_clips if scissor is not None]
+        if scissors:
+            clips.setdefault(item.get("seqno"), (
+                max(s[0] for s in scissors), max(s[1] for s in scissors),
+                min(s[2] for s in scissors), min(s[3] for s in scissors),
+            ))
+    return clips
+
+
+def _grown(box, pad: float) -> tuple:
+    return (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
+
+
+def _hidden_by(box, clip) -> bool:
+    """Report whether nothing of `box` shows through `clip`."""
+    return (clip[0] > clip[2] or clip[1] > clip[3]
+            or box[2] < clip[0] or box[0] > clip[2]
+            or box[3] < clip[1] or box[1] > clip[3])
+
+
+def _spills(box, clip) -> bool:
+    """Report whether `box` reaches visibly beyond `clip`."""
+    return (box[0] < clip[0] - _CLIP_SLACK or box[1] < clip[1] - _CLIP_SLACK
+            or box[2] > clip[2] + _CLIP_SLACK or box[3] > clip[3] + _CLIP_SLACK)
+
+
+def _clip_box(box, clip):
+    """The part of `box` inside `clip`, or None when nothing of it is."""
+    x0, y0 = max(box[0], clip[0]), max(box[1], clip[1])
+    x1, y1 = min(box[2], clip[2]), min(box[3], clip[3])
+    if x0 > x1 or y0 > y1:
+        return None
+    return fitz.Rect(x0, y0, x1, y1)
+
+
+def _clip_segment(x0: float, y0: float, x1: float, y1: float, clip):
+    """The part of a segment inside `clip` (Liang-Barsky), or None."""
+    dx, dy = x1 - x0, y1 - y0
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x0 - clip[0]), (dx, clip[2] - x0),
+                 (-dy, y0 - clip[1]), (dy, clip[3] - y0)):
+        if p == 0:
+            if q < 0:
+                return None   # parallel to this edge, and outside it
+            continue
+        t = q / p
+        if p < 0:
+            if t > t1:
+                return None
+            t0 = max(t0, t)
+        else:
+            if t < t0:
+                return None
+            t1 = min(t1, t)
+    return (x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy)
+
+
+def _outline_sides(rect) -> list:
+    """The segments a stroked rectangle paints: one if it is flat."""
+    x0, y0, x1, y1 = rect
+    if y0 == y1 or x0 == x1:
+        return [(x0, y0, x1, y1)]
+    return [(x0, y0, x1, y0), (x1, y0, x1, y1), (x1, y1, x0, y1), (x0, y1, x0, y0)]
+
+
+def _visible_drawings(page) -> list:
+    """The page's vector paths that show, each with the clip it is painted in.
+
+    A list of (path, clip) pairs, in the order the page paints them; clip is
+    None for a path under no clip. A path entirely outside its clip is left
+    out: whatever it is, the page never shows it.
+    """
+    clips = _clips_by_seqno(page)
+    visible = []
+    for path in page.get_drawings():
+        clip = clips.get(path.get("seqno"))
+        if clip is not None:
+            pad = (path.get("width") or 0) / 2 if path.get("color") is not None else 0.0
+            if _hidden_by(_grown(tuple(path["rect"]), pad), clip):
+                continue
+        visible.append((path, clip))
+    return visible
 
 
 def detect_optimal_mode(pdf_path: str) -> tuple[str, str | None]:
@@ -1920,21 +2130,30 @@ def _glyph_regions(small: list, curve_counts: list) -> list:
     return regions
 
 
-def _artwork_regions(page) -> list:
+def _artwork_regions(page, drawings: list | None = None) -> list:
     """Return the page areas that must be rasterised to survive at all.
 
     Kept deliberately conservative: a region has to be big enough to be a
     figure rather than a stray flourish, and if the total would cover most of
     the page the document is really a picture and the whole page-image mode is
     the better answer, so nothing is rasterised here.
+
+    `drawings` is what _visible_drawings returns for the page, when the
+    caller already has it.
     """
     boxes = []
     paths = []
-    for path in page.get_drawings():
+    for path, clip in (drawings if drawings is not None else _visible_drawings(page)):
         items = path.get("items", [])
         if not _path_is_artwork(items):
             continue
         rect = fitz.Rect(path["rect"]) & page.rect
+        if clip is not None and _spills(rect, clip):
+            # The raster shows only what the clip lets through anyway; the
+            # region need not be any larger than that.
+            rect = _clip_box(rect, clip)
+            if rect is None:
+                continue
         if rect.is_empty or rect.width <= 0 or rect.height <= 0:
             continue
         boxes.append(rect)
@@ -2062,8 +2281,35 @@ def _split_span_runs(span) -> list:
         x1 = max(char["bbox"][2] for char in visible)
         y0 = min(char["bbox"][1] for char in visible)
         y1 = max(char["bbox"][3] for char in visible)
-        out.append((text, (x0, y0, x1, y1)))
+        origin = visible[0].get("origin")
+        out.append((text, (x0, y0, x1, y1), origin[1] if origin else None))
     return out
+
+
+# Where the decoders put a line's baseline in its box, in ems. Version 2.1.0
+# of the original program, and this one up to 2.5, lay the line out as HTML
+# from the top of its box: the baseline lands 0.8 em below it, whatever the
+# box. Version 2.2 of the original draws it 0.21 em above the bottom of the
+# box, whatever the top. A box 0.8 em above the baseline and 0.21 em below
+# puts the text at its place for all of them; MuPDF's own boxes are the
+# font's, a Helvetica line 1.07 em tall above the baseline, which every
+# decoder set 0.27 em too high -- and our boxes opened to the page corner,
+# version 2.2 at the foot of the page.
+_BOX_ASCENT = 0.8
+_BOX_DESCENT = 0.21
+
+
+# Recorded in the manifest as "tl": its text boxes are hung from the baseline
+# and reach exactly as far as their text, trailing spaces included (see
+# _settle_trailing_spaces). This decoder then sets text by those rules rather
+# than guessing; every other one ignores the key, as it ignores all it does
+# not know -- checked against the original's 2.1.0 and 2.2.
+_TEXT_LAYOUT = 1
+
+
+def _baseline_box(box, baseline: float, size: float) -> tuple:
+    """`box` with its top and bottom set from the baseline (see _BOX_ASCENT)."""
+    return (box[0], baseline - _BOX_ASCENT * size, box[2], baseline + _BOX_DESCENT * size)
 
 
 # Span keys that make two spans render differently. Spans equal on all of them
@@ -2337,19 +2583,55 @@ def _add_overlooked_spaces(raw: dict) -> None:
             line["spans"] = spans
 
 
+def _settle_trailing_spaces(spans: list, faces: dict, precision: int) -> None:
+    """Make every span's box reach exactly as far as its text, spaces included.
+
+    A box ends at its last glyph, and a span's text may end on spaces: the
+    one put back before the next word (see _restore_space), or the padding a
+    cell carried. Version 2.2 of the original shrinks a span until its text,
+    spaces and all, fits its box -- by a twentieth, for a word and its space
+    -- and this decoder fits it too. The spaces ending a line separate
+    nothing and go; a span followed by another keeps its spaces, and its box
+    is widened by their width in the font the decoders set it in.
+    """
+    last = spans[-1]
+    last["t"] = last["t"].rstrip()
+    fonts = faces.get("class_fonts")
+    if fonts is None:
+        fonts = faces["class_fonts"] = _Fonts()
+    for span in spans[:-1]:
+        trailing = len(span["t"]) - len(span["t"].rstrip(" "))
+        box = span.get("b")
+        if not trailing or box is None:
+            continue
+        font = fonts.get(span.get("fa", "s"), span.get("f", "R"))
+        width = font.glyph_advance(32) * span.get("sz", 8) * trailing
+        span["b"] = [box[0], box[1], _quantize(box[2] + width, precision), box[3]]
+
+
 def _restore_space(previous: dict, text: str, box, size: float) -> None:
     """Put back the space MuPDF found between `previous` and the word `text`.
 
-    Only where the decoders set the two in one run -- no further apart than
-    _SPAN_SPLIT_RATIO of the font size, see _draw_line -- since that is where
-    they would otherwise run together. Further apart, each is placed on its
-    own and a trailing space would only widen the first. The space goes on
-    the word before: the next one's box starts at its first glyph, and a
-    leading space would push it right.
+    Where the two are no further apart than _SPAN_SPLIT_RATIO of the font
+    size: the original's 2.1.0 sets every span of a line one after the other,
+    and the 2.5 decoder set spans that close in one run, where they would
+    otherwise run together. Further apart, each is placed on its own, and the
+    space is put back only after a character MuPDF guesses none after (see
+    _space_overlooked_after): a reader of the rebuilt page would otherwise
+    take the two for one word. Word sets a list's bullet, from Wingdings, a
+    tab's width before its text; the bullet read back "➢le" where the source
+    reads "le". The box of the word before takes the space in (see
+    _settle_trailing_spaces), so no decoder sets it smaller.
+
+    The space goes on the word before: the next one's box starts at its first
+    glyph, and a leading space would push it right. It is a glyph in the
+    text, which a reader extracting the text finds whatever precedes it.
     """
+    last = previous["t"][-1:]
+    if last.isspace() or text[:1].isspace():
+        return
     gap = box[0] - previous["b"][2]
-    if (gap <= max(1.0, _SPAN_SPLIT_RATIO * size)
-            and not previous["t"][-1:].isspace() and not text[:1].isspace()):
+    if gap <= max(1.0, _SPAN_SPLIT_RATIO * size) or _space_overlooked_after(last):
         previous["t"] += " "
 
 
@@ -2358,14 +2640,13 @@ def _merge_adjacent_spans(spans: list, line_box) -> list:
 
     LibreOffice draws the "ti" and "tt" ligatures from a separate font, so a
     word such as "Identité" reaches the extraction as three spans -- "Iden",
-    "ti", "té" -- each with its own box. Both decoders put them back on the
-    line side by side in one HTML box: the original concatenates every span
-    of a line, and this one groups spans no further apart than
-    _SPAN_SPLIT_RATIO of the font size (see _draw_line). Joined by that same
-    rule they produce the same HTML less two tag boundaries, and the same
-    page, measured pixel for pixel through both decoders. On the
-    LibreOffice situation sheet the boxes of these fragments were a tenth of
-    the archive.
+    "ti", "té" -- each with its own box. The original's 2.1.0 concatenates
+    every span of a line, and the 2.5 decoder grouped spans no further apart
+    than _SPAN_SPLIT_RATIO of the font size into one HTML run: joined by that
+    rule they made the same page, measured pixel for pixel through both. The
+    2.6 decoder sets the joined span to the joined box, as it would have set
+    the fragments one after another. On the LibreOffice situation sheet the
+    boxes of these fragments were a tenth of the archive.
     """
     merged: list = []
     previous_end = None
@@ -2429,44 +2710,60 @@ def _text_width(faces: dict, key: tuple, text: str, size: float) -> float | None
 
 def _open_line_box(line: dict, page_w: float, page_h: float, precision: int,
                    faces: dict) -> list:
-    """The box to store for a line, opened to the page corner when it can be.
+    """The box to store for a line, opened to the page's right edge if it can be.
 
-    Both decoders lay a line out in an HTML box built from its stored box:
-    left and top place the text, and right and bottom only decide whether it
-    fits -- when it does not, it is scaled down to fit. A line whose text
-    already fits at full size is therefore drawn identically in any larger
-    box, and the page's own bottom-right corner is the largest: one value
-    repeated on every such line, which LZMA codes for almost nothing, instead
-    of two fresh coordinates per line. On the situation sheets the right and
-    bottom edges were a sixth of the archive.
+    A line's right edge serves only to fit its text: every decoder shrinks a
+    line that would overflow it, and this one also spreads a justified line
+    to reach it. A line drawn the same in any wider box loses nothing when
+    its box reaches to the page's right edge: one value repeated on every
+    such line, which LZMA codes for almost nothing, instead of a fresh
+    coordinate.
+
+    Up to 2.5 the bottom went down to the page corner too, which the
+    original's decoder 2.1.0 and this one ignore. Its 2.2 does not: it sets
+    the baseline from the bottom of the box (see _BOX_ASCENT), and every such
+    line came out at the foot of the page. The bottom stays where it is.
 
     Only lines of a single span qualify, set in a face that has every glyph
-    (a substituted font would lay out at another width), whose text fits the
-    stored box at full size with _FIT_MARGIN to spare. Lines that are scaled
-    down keep their exact box, since there the box sets the scale.
+    (a substituted font would lay out at another width). The text must fit
+    at full size in the original's 2.1.0, which sets it in Helvetica -- for
+    Calibri's class too -- in the box widened by half a point on each side;
+    and in this decoder's own font (see _paint_line), within _FIT_SLACK,
+    without being narrower than the box if it has words to spread.
+
+    `page_h` is unused, and kept so that callers need not change.
     """
     box = line["b"]
     spans = line.get("s", [])
     if len(spans) != 1 or "b" in spans[0]:
         return box
     span = spans[0]
-    key = (span.get("fa", "s"), span.get("f", "R"))
+    family, style = span.get("fa", "s"), span.get("f", "R")
+    key = ("s" if family == "c" else family, style)
     text = span.get("t", "")
     if key not in _BASE14_FACES or not text:
         return box
-    needed = _text_width(faces, key, text, span.get("sz", 8))
+    size = span.get("sz", 8)
+    needed = _text_width(faces, key, text, size)
     if needed is None:
         return box
     x0, y0, x1, y1 = box
+    width = x1 - x0
     right = _quantize(page_w, precision)
-    bottom = _quantize(page_h, precision)
-    # Both decoders widen the box by half a point on each side. The new box
-    # must also contain the old one: the original decoder clips each line to
-    # its box, so a smaller one could cut off a descender.
-    if (needed > x1 - x0 + 1.0 - _FIT_MARGIN
-            or right < x1 or bottom < y1):
+    if needed > width + 1.0 - _FIT_MARGIN or right < x1:
         return box
-    return [x0, y0, right, bottom]
+    natural = needed
+    if family == "c":
+        fonts = faces.get("class_fonts")
+        if fonts is None:
+            fonts = faces["class_fonts"] = _Fonts()
+        natural = fonts.get(family, style).text_length(text, fontsize=size)
+    if natural > width + _fit_slack(box):
+        return box
+    if (natural < width - _justify_reach(box)
+            and text.strip().count(" ") >= _JUSTIFY_MIN_GAPS):
+        return box
+    return [x0, y0, right, y1]
 
 
 def _covered(box, regions) -> bool:
@@ -2485,12 +2782,16 @@ def _covered(box, regions) -> bool:
 
 def _extract_page(page, page_idx: int, images_data: dict,
                   precision: int = 1, artwork: list | None = None,
-                  bad_fonts: set | None = None, faces: dict | None = None) -> dict:
+                  bad_fonts: set | None = None, faces: dict | None = None,
+                  drawings: list | None = None) -> dict:
     """Build the manifest entry for one page.
 
     Content falling inside a rasterised artwork region is skipped: it is
     already in the picture, and drawing it a second time as text or as a
     rectangle produces a sharp copy sitting on top of a blurred one.
+
+    `drawings` is what _visible_drawings returns for the page, when the
+    caller already has it.
     """
     artwork = artwork or []
     bad_fonts = bad_fonts if bad_fonts is not None else _fonts_without_unicode(page)
@@ -2507,6 +2808,9 @@ def _extract_page(page, page_idx: int, images_data: dict,
     # Base-14 faces and their glyph advances, shared by every page of a
     # document when the caller passes one dict along.
     faces = faces if faces is not None else {}
+    # Program names are read once per font of the document: they share the
+    # dict the base-14 faces are cached in, under a key of their own.
+    programs = _font_programs(page, faces.setdefault("programs", {}))
     raw = page.get_text("rawdict")
     # The spaces MuPDF guessed, corrected where they can be checked: settled
     # by the pitch where letters advance by a fixed step, then -- on a page
@@ -2524,6 +2828,12 @@ def _extract_page(page, page_idx: int, images_data: dict,
             if _covered(line["bbox"], artwork):
                 continue
             out_line: dict = {"b": _quantize_box(line["bbox"], precision), "s": []}
+            # Boxes are hung from the baseline where there is one to hang
+            # them from (see _BOX_ASCENT); a vertical or rotated line keeps
+            # MuPDF's box, which no decoder sets right anyway.
+            horizontal = _is_horizontal(line)
+            # (size, length, baseline) of every run, to pick the line's own.
+            runs_seen: list = []
             # Set by a span of spaces only, cleared by the next word.
             space_between = False
             for span in line.get("spans", []):
@@ -2544,11 +2854,16 @@ def _extract_page(page, page_idx: int, images_data: dict,
                     # this span's box carries the real glyphs; a transcription
                     # here would paint a wrong string on the right picture.
                     continue
-                font_key, family = _classify_font(span.get("font", ""))
+                font_key, family = _classify_span_font(span, programs)
                 size = _quantize(span.get("size", 8), 1)
                 colour = span.get("color", 0)
+                # Symbol's and Wingdings' codes, as the characters they draw.
+                symbols = translation_for(programs.get(span.get("font", ""))
+                                          or span.get("font", ""))
 
-                for raw_text, box in _split_span_runs(span):
+                for raw_text, box, baseline in _split_span_runs(span):
+                    if symbols:
+                        raw_text = raw_text.translate(symbols)
                     if _is_unreadable(raw_text):
                         # Lost to a missing ToUnicode table. The raster made
                         # from this span's box carries the real glyphs; a
@@ -2558,6 +2873,9 @@ def _extract_page(page, page_idx: int, images_data: dict,
                     text = _normalize_text(raw_text)
                     if not text.strip():
                         continue
+                    if horizontal and baseline is not None:
+                        box = _baseline_box(box, baseline, size)
+                        runs_seen.append((size, len(text), baseline))
                     stored_box = _quantize_box(box, precision)
                     if space_between and out_line["s"]:
                         _restore_space(out_line["s"][-1], text, stored_box, size)
@@ -2578,6 +2896,21 @@ def _extract_page(page, page_idx: int, images_data: dict,
 
             if not out_line["s"]:
                 continue
+            _settle_trailing_spaces(out_line["s"], faces, precision)
+            if runs_seen:
+                # The line hangs from the baseline of its largest text, the
+                # longest run of it if several share that size: the original's
+                # 2.1.0 sets every span of a line on that one. It reaches
+                # from the first glyph kept to the last: MuPDF's own box also
+                # takes in the spaces around them, a Word title's trailing
+                # one in a font of its own, and a reader fitting the text to
+                # its box would spread it over that space.
+                size_max = max(run[0] for run in runs_seen)
+                base = max(runs_seen, key=lambda run: (run[0], run[1]))[2]
+                kept = [span["b"] for span in out_line["s"]]
+                extent = (min(b[0] for b in kept), 0, max(b[2] for b in kept), 0)
+                out_line["b"] = _quantize_box(
+                    _baseline_box(extent, base, size_max), precision)
             # A lone span covers its whole line, and the reader falls back to
             # the line box when a span has none. Storing it twice is the
             # single largest redundancy in the manifest.
@@ -2620,9 +2953,11 @@ def _extract_page(page, page_idx: int, images_data: dict,
         page_data["ir"].append({"x": str(xref), "b": box})
 
     # --- vector rectangles and rules -----------------------------------------
-    drawings: list = []
+    entries: list = []
     page_area = abs(page.rect.width * page.rect.height) or 1.0
-    for path in page.get_drawings():
+    if drawings is None:
+        drawings = _visible_drawings(page)
+    for path, clip in drawings:
         fill = path.get("fill")
         color = path.get("color")
         if fill is None and color is None:
@@ -2630,6 +2965,25 @@ def _extract_page(page, page_idx: int, images_data: dict,
 
         width = path.get("width", 0) or 0
         items = path.get("items", [])
+        # How far a stroke reaches beyond its centre line.
+        pad = width / 2 if color is not None else 0.0
+
+        def add_rules(segments, colour) -> None:
+            """Store straight strokes as rules, cut down to the clip."""
+            for x0, y0, x1, y1 in segments:
+                if clip is not None and _spills(
+                        _grown((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)), pad),
+                        clip):
+                    piece = _clip_segment(x0, y0, x1, y1, _grown(clip, pad))
+                    if piece is None:
+                        continue
+                    x0, y0, x1, y1 = piece
+                seg = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+                if _covered(seg + (-1, -1, 1, 1), artwork):
+                    continue
+                entries.append(_rule_entry(
+                    x0, y0, x1, y1, _color_to_hex(colour), width, precision,
+                ))
 
         # Straight rules first: a path that is only axis-aligned strokes is a
         # set of borders or dividers, each stored as a stroked zero-height
@@ -2639,27 +2993,31 @@ def _extract_page(page, page_idx: int, images_data: dict,
         # outline keeps its strokes; its fill has no rectangle to go in.
         if (color is not None and _path_is_only_axis_lines(items)
                 and (fill is None or not _rects_from_path_items(items))):
-            for x0, y0, x1, y1 in _axis_lines_from_path_items(items):
-                seg = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-                if _covered(seg + (-1, -1, 1, 1), artwork):
-                    continue
-                drawings.append(_rule_entry(
-                    x0, y0, x1, y1, _color_to_hex(color), width, precision,
-                ))
+            add_rules(_axis_lines_from_path_items(items), color)
             continue
 
         for rect in _rects_from_path_items(items):
             rect = fitz.Rect(rect).normalize()
             if rect.is_infinite:
                 continue
+            outline = color   # the stroke still to be stored with the box
+            if clip is not None and _spills(_grown(tuple(rect), pad), clip):
+                if color is not None:
+                    # Where the clip crosses an outline, what shows is pieces
+                    # of its sides: each one goes in as a rule, and the fill,
+                    # if any, is cut down to the clip on its own.
+                    add_rules(_outline_sides(tuple(rect)), color)
+                    outline = None
+                    if fill is None:
+                        continue
+                rect = _clip_box(tuple(rect), clip)
+                if rect is None:
+                    continue
             if rect.is_empty:
                 # Stroked, a rectangle of no height is a line, and the source
                 # draws it; filled only, it paints nothing.
-                if color is not None and not _covered(rect + (-1, -1, 1, 1), artwork):
-                    drawings.append(_rule_entry(
-                        rect.x0, rect.y0, rect.x1, rect.y1,
-                        _color_to_hex(color), width, precision,
-                    ))
+                if outline is not None:
+                    add_rules(_outline_sides(tuple(rect)), outline)
                 continue
 
             # A near-page-size dark fill is almost always a scanner ink layer
@@ -2674,7 +3032,7 @@ def _extract_page(page, page_idx: int, images_data: dict,
                 continue
 
             thickness = min(rect.width, rect.height)
-            if (precision <= 0 and fill is not None and color is None
+            if (precision <= 0 and fill is not None and outline is None
                     and _RULE_MIN_THICKNESS <= thickness < _RULE_MAX_THICKNESS):
                 # A thin plain fill is a border. At whole-point coordinates
                 # it is stored as a rule, so its thickness survives the
@@ -2682,7 +3040,7 @@ def _extract_page(page, page_idx: int, images_data: dict,
                 # already keeps it, in fewer bytes and closer to the source:
                 # measured on the Excel sheet, the rule form cost 7 % more
                 # there and drifted further from the original rendering.
-                drawings.append(_rule_entry(
+                entries.append(_rule_entry(
                     rect.x0, rect.y0, rect.x1, rect.y1,
                     _color_to_hex(fill), thickness, precision,
                 ))
@@ -2691,20 +3049,20 @@ def _extract_page(page, page_idx: int, images_data: dict,
             entry = {"t": "rect", "r": _quantize_box(rect, precision)}
             if fill is not None:
                 entry["f"] = _color_to_hex(fill)
-            if color is not None:
-                entry["c"] = _color_to_hex(color)
+            if outline is not None:
+                entry["c"] = _color_to_hex(outline)
                 # A stroke width means nothing without a stroke colour.
                 stroke = _stroke_width(width)
                 if stroke is not None:
                     entry["w"] = stroke
-            drawings.append(entry)
+            entries.append(entry)
 
     # Compacted after rounding: at whole-point precision the rounding itself
     # makes many border pieces meet exactly, which lets them join. Measured
     # against compacting on a tenth-of-a-point grid first and rounding after,
     # this gave smaller archives and renderings closer to the source on all
     # four test documents.
-    page_data["dr"] = _compact_drawings(drawings, tuple(page.rect), precision)
+    page_data["dr"] = _compact_drawings(entries, tuple(page.rect), precision)
 
     # --- hyperlinks ---------------------------------------------------------
     # Stored under a page key the original decoder never reads, so it is
@@ -2846,6 +3204,7 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
         manifest = {
             "v": "1.0.6",
             "src": os.path.basename(pdf_path),
+            "tl": _TEXT_LAYOUT,
             "pages": [],
             "page_sizes": [],
             "images": image_meta,
@@ -2857,7 +3216,8 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
         faces: dict = {}
 
         for page_idx, page in enumerate(doc):
-            regions = [] if skip_images else _artwork_regions(page)
+            drawings = _visible_drawings(page)
+            regions = [] if skip_images else _artwork_regions(page, drawings)
             # Unreadable text is rasterised whatever the image setting: the
             # operator chose to drop pictures, not to lose their own entries.
             regions = regions + _unreadable_text_regions(page)
@@ -2879,7 +3239,8 @@ def _compress_struct(pdf_path: str, params: dict, progress_cb: ProgressFn,
 
             page_data = _extract_page(page, page_idx, images_data,
                                       params.get("coord_precision", 1),
-                                      [r for _, r in rendered], faces=faces)
+                                      [r for _, r in rendered], faces=faces,
+                                      drawings=drawings)
 
             # Placed after extraction so the artwork sits above the fills and
             # below the text, exactly where the original drew it.
@@ -3052,8 +3413,8 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
     """Compress a PDF into a .psdi archive, or a compact .psdz one.
 
     A .psdi is what every implementation of the format reads, the original
-    included, and is byte for byte what versions before 2.5.0 wrote. A .psdz
-    (`compact`) is smaller and read only by this implementation from 2.5.0.
+    included. A .psdz (`compact`) is smaller and read only by this
+    implementation, from 2.5.0.
 
     Returns the archive bytes and a report covering size, ratio and the
     estimated on-air time per radio mode.
@@ -3131,6 +3492,49 @@ def pdf_to_archive(pdf_path: str, quality: str = QUALITY_MEDIUM,
     return archive_bytes, info
 
 
+def _line_points(entry: dict) -> list:
+    """The points of a "line" drawing entry, in either of its two shapes.
+
+    Version 2.2 of the original program writes every stroke as a "line"
+    whose "p" lists the coordinates of a polyline, flat: x0, y0, x1, y1, ...
+    (its own reader draws it open, half a point wide unless "w" says
+    otherwise, which is what the rebuild here does too). Before that, a
+    "line" carried its two ends in "r". An archive from 2.2 used to stop the
+    rebuild here on its first line, with a KeyError.
+
+    Anything that is not a list of numbers yields no points, and the entry
+    is skipped rather than the page lost.
+    """
+    coords = entry.get("p", entry.get("r"))
+    if not isinstance(coords, (list, tuple)):
+        return []
+    if coords and all(isinstance(pair, (list, tuple)) for pair in coords):
+        coords = [value for pair in coords for value in pair[:2]]
+    if not all(isinstance(value, (int, float)) for value in coords):
+        return []
+    return [fitz.Point(coords[i], coords[i + 1]) for i in range(0, len(coords) - 1, 2)]
+
+
+def _objects(container, key: str) -> list:
+    """The entries of `container[key]` that are objects; nothing else.
+
+    An archive comes over the air from programs this one does not know.
+    Version 2.2 of the original writes drawing entries 2.5 had never seen,
+    and the 2.5 rebuild stopped on the first one. What cannot be drawn is
+    skipped, and the rest of the page drawn.
+    """
+    value = container.get(key) if isinstance(container, dict) else None
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, dict)]
+
+
+def _number(value, default: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return value
+    return default
+
+
 def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
                     compact: bool = False) -> tuple[bytes, dict]:
     parsed = (psdi.read_compact_struct if compact else psdi.read_struct)(archive_data)
@@ -3139,14 +3543,12 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
     if compact:
         _require_codecs(images.values())
 
-    # Text lines are the unit of work: each one is laid out through a Story
-    # and a temporary document, which is where nearly all the time goes. A
-    # dense table page can hold three hundred of them against a dozen on a
-    # cover page, so counting pages alone would still leave the bar sitting
-    # still for seconds.
+    # Text lines are the unit of work. A dense table page can hold three
+    # hundred of them against a dozen on a cover page, so counting pages
+    # alone would leave the bar sitting still on the dense ones.
     page_total = len(manifest["pages"])
     line_counts = [
-        sum(len(block.get("l", [])) for block in page_data.get("tb", []))
+        sum(len(_objects(block, "l")) for block in _objects(page_data, "tb"))
         for page_data in manifest["pages"]
     ]
     progress = _Progress(
@@ -3156,6 +3558,8 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
     )
 
     doc = fitz.open()
+    fonts = _Fonts()
+    hung = manifest.get("tl") == _TEXT_LAYOUT
     try:
         for page_no, page_data in enumerate(manifest["pages"], start=1):
             page_idx = page_data["pn"] - 1
@@ -3167,10 +3571,12 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
             # Rectangles first: they are backgrounds and cell fills, and must
             # sit under everything else.
             shape = page.new_shape()
-            for entry in page_data.get("dr", []):
+            for entry in _objects(page_data, "dr"):
                 kind = entry.get("t")
                 if kind == "rect":
-                    line_width = entry.get("w", 0)
+                    if not _is_box(entry.get("r")):
+                        continue
+                    line_width = _number(entry.get("w", 0), 0)
                     shape.draw_rect(fitz.Rect(entry["r"]))
                     shape.finish(
                         color=_hex_to_rgb(entry.get("c", "")),
@@ -3178,18 +3584,29 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
                         width=line_width if line_width > 0.1 else 0,
                     )
                 elif kind == "line":
-                    x0, y0, x1, y1 = entry["r"]
-                    shape.draw_line(fitz.Point(x0, y0), fitz.Point(x1, y1))
+                    points = _line_points(entry)
+                    if len(points) < 2:
+                        continue
+                    shape.draw_polyline(points)
+                    width = _number(entry.get("w", 0.5), 0.5)
+                    if width < 0:
+                        width = 0.5
+                    if "p" not in entry:
+                        width = max(width, 0.3)
                     shape.finish(
                         color=_hex_to_rgb(entry.get("c", "")) or (0, 0, 0),
-                        width=max(entry.get("w", 0.5), 0.3),
+                        width=width,
+                        closePath=False,
                     )
             shape.commit()
 
-            for ref in page_data.get("ir", []):
-                payload = images.get(ref["x"])
+            for ref in _objects(page_data, "ir"):
+                key = ref.get("x")
+                payload = images.get(key if isinstance(key, str) else str(key))
+                if not payload or not _is_box(ref.get("b")):
+                    continue
                 rect = fitz.Rect(ref["b"])
-                if not payload or rect.is_empty or rect.is_infinite:
+                if rect.is_empty or rect.is_infinite:
                     # 2.2.x could round a sliver of an image to zero width,
                     # and insert_image raises on an empty rectangle: one
                     # invisible placement used to abort the whole rebuild.
@@ -3199,25 +3616,29 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
                 except Exception:  # noqa: BLE001
                     # An undecodable payload costs that image, not the page.
                     log.warning("Image %s could not be placed on page %d",
-                                ref["x"], page_no, exc_info=True)
+                                key, page_no, exc_info=True)
             progress.advance(_COST_REBUILD_PAGE, f"{label}…")
 
             line_total = line_counts[page_no - 1]
             drawn = 0
-            layer = _TextLayer(page.rect)
-            for block in page_data.get("tb", []):
-                for line in block.get("l", []):
-                    _draw_line(page, line, layer)
+            painter = _TextPainter(page, fonts)
+            for block in _objects(page_data, "tb"):
+                for line in _objects(block, "l"):
+                    _paint_line(painter, line, hung)
                     drawn += 1
                     progress.advance(
                         _COST_REBUILD_LINE,
                         f"{label} — texte {drawn}/{line_total}…",
                     )
-            layer.commit(page)
+            painter.commit()
 
-            _draw_checkmarks(page, page_data.get("ck", []))
+            checks = page_data.get("ck")
+            _draw_checkmarks(page, [box for box in checks if _is_box(box)]
+                             if isinstance(checks, list) else [])
 
-            for link in page_data.get("lk", []):
+            for link in _objects(page_data, "lk"):
+                if not _is_box(link.get("b")) or not isinstance(link.get("u"), str):
+                    continue
                 try:
                     page.insert_link({
                         "kind": fitz.LINK_URI,
@@ -3229,13 +3650,26 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
                               exc_info=True)
 
         progress.phase("Enregistrement du PDF…")
+        # Carlito goes in whole otherwise, 600 to 800 KB a style: a five-page
+        # bulletin weighed 1.3 MB. Cut down to the glyphs used it is 170 KB,
+        # in a twentieth of a second, by MuPDF's own subsetter. Should that
+        # ever fail, the file is only larger.
+        try:
+            doc.subset_fonts()
+        except Exception:  # noqa: BLE001
+            log.warning("Font subsetting failed; fonts kept whole", exc_info=True)
+        try:
+            _exact_widths(doc)
+        except Exception:  # noqa: BLE001
+            # The glyphs then sit where MuPDF's widths put them, a few tenths
+            # of a point short at the end of a long line.
+            log.warning("Glyph widths left as written", exc_info=True)
         buf = io.BytesIO()
-        # garbage=4 merges duplicate resources: each page's text layer is a
-        # form XObject with its own copy of the fonts, and without level 4
-        # the file is several times larger. clean=True is deliberately
-        # absent: it re-serialises every content stream for a file that
-        # renders pixel for pixel the same, and this file never goes on the
-        # air, so its size is of no consequence; the wait was.
+        # garbage=4 merges duplicate resources, a font used on every page
+        # among them. clean=True is deliberately absent: it re-serialises
+        # every content stream for a file that renders pixel for pixel the
+        # same, and this file never goes on the air, so its size matters
+        # less than the wait.
         doc.save(buf, deflate=True, deflate_images=True, garbage=4)
         progress.finish("PDF enregistré")
     finally:
@@ -3250,189 +3684,501 @@ def _rebuild_struct(archive_data: bytes, progress_cb: ProgressFn,
     return buf.getvalue(), info
 
 
-class _TextLayer:
-    """Every text run of one page, laid out into a single form XObject.
+# --- text, set at its place ----------------------------------------------------
+# Each span is set at its own position, on its baseline, in a font with the
+# widths of the one the class names: Nimbus Sans for Helvetica and Arial,
+# Nimbus Roman for Times, Nimbus Mono for Courier -- all three built into
+# MuPDF -- and Carlito, shipped with the program, for Calibri. A glyph a font
+# lacks comes from MuPDF's own fallback fonts, as it did through HTML.
 
-    `Page.insert_htmlbox` builds a one-page document per run and grafts it
-    onto the page with `show_pdf_page`, which first lists every XObject,
-    image and font already on the page to pick an unused resource name. That
-    listing grows with each run, so a page costs time quadratic in its line
-    count: on a 294-line table page the last runs took 44 ms each against
-    8 ms for the first, and that page alone took seven seconds.
-
-    Here each run goes through the same Story layout and the same
-    fit-to-box shrinking as insert_htmlbox -- the arithmetic is copied from
-    it, so the glyphs land on the same pixels -- but is drawn into one
-    DocumentWriter page the size of the target page, grafted once at the
-    end. The rebuilt bulletin went from 15.5 s to under 3 s, and the saved
-    PDF shrank, since the fonts are embedded once per page rather than once
-    per run.
-    """
-
-    _BODY_MARGIN_CSS = "body {margin:1px;}"  # what insert_htmlbox prepends
-
-    def __init__(self, page_rect):
-        self._stream = io.BytesIO()
-        self._writer = fitz.DocumentWriter(self._stream)
-        self._device = self._writer.begin_page(
-            fitz.Rect(0, 0, page_rect.width, page_rect.height)
-        )
-        self._runs = 0
-
-    def add(self, rect, html: str, css: str, scale_low: float) -> bool:
-        """Lay out one run inside `rect`; False when it fits at no scale."""
-        story = fitz.Story(html=html, user_css=self._BODY_MARGIN_CSS + css)
-        # insert_htmlbox fits by asking how much *larger* the box must grow
-        # to hold the text, then draws the result shrunk by the inverse.
-        temp_rect = fitz.Rect(0, 0, rect.width, rect.height)
-        fit = story.fit_scale(
-            temp_rect, scale_min=1, scale_max=1 / scale_low,
-            flags=fitz.mupdf.FZ_PLACE_STORY_FLAG_NO_OVERFLOW,
-        )
-        if not fit.big_enough:
-            return False
-        scale = 1 / fit.parameter
-        story.place(fit.rect)
-        story.draw(self._device,
-                   fitz.Matrix(scale, 0, 0, scale, rect.x0, rect.y0))
-        self._runs += 1
-        return True
-
-    def commit(self, page) -> None:
-        """Graft the layer onto `page`, above whatever is already drawn."""
-        self._writer.end_page()
-        self._writer.close()
-        if not self._runs:
-            return
-        source = fitz.open(stream=self._stream.getvalue(), filetype="pdf")
-        try:
-            page.show_pdf_page(page.rect, source, 0)
-        finally:
-            source.close()
+_STYLE_INDEX = {"R": 0, "B": 1, "I": 2, "BI": 3}
+_CLASS_FONTS = {
+    "s": ("helv", "hebo", "heit", "hebi"),
+    "t": ("tiro", "tibo", "tiit", "tibi"),
+    "m": ("cour", "cobo", "coit", "cobi"),
+    "c": ("Carlito-Regular.ttf", "Carlito-Bold.ttf", "Carlito-Italic.ttf",
+          "Carlito-BoldItalic.ttf"),
+}
+# How far a span wider than the width the source gave it may be shrunk.
+_FIT_MIN = 0.5
+# Below this, a span a little too wide is left alone: in points for the
+# exact boxes of 2.6, as a fraction of the width for older ones. Measured on
+# a Word manual, 2 % of a line of body text was enough to run its last word
+# into the next span's first. A box at whole points may be a point narrower
+# than its text from the rounding alone.
+_FIT_SLACK = 0.25
+_FIT_SLACK_WHOLE_POINTS = 1.0
+_FIT_TOLERANCE = 0.02
 
 
-def _draw_line(page, line: dict, layer: _TextLayer | None = None) -> None:
-    """Render one line of text, preserving the columns it was laid out in.
+def _whole_points(box) -> bool:
+    return all(isinstance(v, int) or float(v).is_integer() for v in box)
 
-    Spans are grouped by position rather than simply concatenated. A line may
-    hold a whole table row, with each cell placed by an explicit cursor move;
-    concatenating those into one box collapses every column against the left
-    edge. Spans that genuinely run on -- a bold word inside a sentence -- have
-    no gap between them and stay in the same box, so inline styling still
-    works.
 
-    With a `layer`, runs are collected there and drawn in one go when the
-    layer is committed; without one they are placed on the page directly,
-    one insert_htmlbox each, which is the slow path kept for comparison.
-    """
-    spans = [span for span in line.get("s", []) if span.get("t")]
-    if not spans:
-        return
+def _fit_slack(box) -> float:
+    """How far text may overflow a box before it is set smaller, in points."""
+    return _FIT_SLACK_WHOLE_POINTS if _whole_points(box) else _FIT_SLACK
 
-    line_box = line["b"]
 
-    clusters: list[list[dict]] = []
-    previous_end = None
-    for span in spans:
-        box = span.get("b", line_box)
-        size = span.get("sz", 8)
-        gap = None if previous_end is None else box[0] - previous_end
-        if gap is None or gap <= max(1.0, _SPAN_SPLIT_RATIO * size):
-            if clusters:
-                clusters[-1].append(span)
+def _justify_reach(box) -> float:
+    """How far short of its box a line must end to be spread, in points."""
+    return _JUSTIFY_MIN_REACH_WHOLE_POINTS if _whole_points(box) else _JUSTIFY_MIN_REACH
+# A span narrower than its box, with this many word spaces or more, has them
+# widened to fill it -- a justified line -- as long as each grows by no more
+# than _JUSTIFY_MAX_SPACE spaces. Stretching the glyphs instead was measured
+# worse on all ten test documents, and so was justifying titles: one space
+# is all a centred title has, and a Word title's box can end on a trailing
+# space set in another font.
+_JUSTIFY_MIN_GAPS = 2
+_JUSTIFY_MAX_SPACE = 1.5
+# Nor is a line spread for less than this, in points; a box rounded to whole
+# points may be wider than its text by a point without being justified.
+_JUSTIFY_MIN_REACH = 0.2
+_JUSTIFY_MIN_REACH_WHOLE_POINTS = 1.0
+# Spans closer than this in the source, in ems, are set one after the other.
+# It is MuPDF's own threshold for guessing a space between two glyphs.
+_ADJACENT_EM = 0.15
+# Where a box comes from a font's own metrics, as MuPDF measures it -- the
+# boxes of archives older than 2.6, from any encoder taller than 1.25 em --
+# its baseline sits at this fraction of its height: Helvetica's, by MuPDF.
+_FONT_BOX_BASELINE = 0.776
+
+
+class _Fonts:
+    """The rebuild's fonts, each loaded once per document."""
+
+    def __init__(self) -> None:
+        self._loaded: dict = {}
+
+    def get(self, family, style) -> "fitz.Font":
+        family = family if isinstance(family, str) and family in _CLASS_FONTS else "s"
+        index = _STYLE_INDEX.get(style, 0) if isinstance(style, str) else 0
+        font = self._loaded.get((family, index))
+        if font is None:
+            name = _CLASS_FONTS[family][index]
+            if name.endswith(".ttf"):
+                try:
+                    font = fitz.Font(fontfile=resource_path("psditool", "fonts", name))
+                except Exception:  # noqa: BLE001
+                    # A build missing its fonts still rebuilds every page, in
+                    # the class's nearest base font.
+                    log.warning("Font %s unavailable, using Helvetica", name)
+                    font = self.get("s", style)
             else:
-                clusters.append([span])
-        else:
-            clusters.append([span])
-        previous_end = box[2]
-
-    for cluster in clusters:
-        boxes = [span.get("b", line_box) for span in cluster]
-        cluster_box = [
-            min(b[0] for b in boxes), line_box[1],
-            max(b[2] for b in boxes), line_box[3],
-        ]
-        _draw_cluster(page, cluster, cluster_box, layer)
+                font = fitz.Font(name)
+            self._loaded[(family, index)] = font
+        return font
 
 
-def _draw_cluster(page, spans: list, bbox,
-                  layer: _TextLayer | None = None) -> None:
-    """Render one run of adjacent spans inside a single box.
+def _span_baseline(box, size: float, page_h: float) -> float:
+    """The baseline of text in a stored box, whoever stored it.
 
-    insert_htmlbox is used rather than insert_text because it handles mixed
-    styling within a run and wraps sensibly. It also applies an internal
-    margin, which on spreadsheets exported at ~4 pt leaves no room at all --
-    hence the half-point of horizontal slack and the permission to shrink the
-    font rather than truncate the string.
+    From 2.6, and in version 2.2 of the original, a box runs from 0.8 em above
+    the baseline to about 0.21 em below (see _BOX_ASCENT): the baseline is
+    0.21 em above its bottom. Up to 2.5 a box could be opened down to the page
+    corner; the decoders of the day set its baseline 0.8 em below the top, and
+    so does this one. Older boxes are a font's own, as MuPDF measured it:
+    hardly more than an em tall for most fonts, where 0.21 em above the
+    bottom lands within a few hundredths of an em, and 1.375 em for
+    Helvetica, where the baseline sits at _FONT_BOX_BASELINE of the height.
     """
-    parts: list[str] = []
-    for span in spans:
-        text = span.get("t", "")
-        if not text:
-            continue
-        escaped = (
-            text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        )
-        color_int = span.get("c", 0)
-        color_hex = (
-            f"#{(color_int >> 16) & 0xFF:02x}"
-            f"{(color_int >> 8) & 0xFF:02x}"
-            f"{color_int & 0xFF:02x}"
-        )
-        style = (
-            f"font-family:{_FAMILY_CSS.get(span.get('fa', 's'), _FAMILY_CSS['s'])};"
-            f"font-size:{span.get('sz', 8)}pt;color:{color_hex};"
-            "line-height:1;margin:0;padding:0;white-space:pre;"
-        )
-        key = span.get("f", "R")
-        if key == "B":
-            parts.append(f'<b style="{style}">{escaped}</b>')
-        elif key == "I":
-            parts.append(f'<i style="{style}">{escaped}</i>')
-        elif key == "BI":
-            parts.append(f'<b><i style="{style}">{escaped}</i></b>')
-        else:
-            parts.append(f'<span style="{style}">{escaped}</span>')
+    x0, y0, x1, y1 = box
+    if y1 >= page_h - 0.6:
+        return y0 + _BOX_ASCENT * size
+    height = y1 - y0
+    if height <= 1.25 * size:
+        return y1 - _BOX_DESCENT * size
+    return y0 + _FONT_BOX_BASELINE * height
 
-    if not parts:
-        return
 
-    line_height = bbox[3] - bbox[1]
-    max_font = max((s.get("sz", 8) for s in spans), default=8)
-    # Proportional, not a fixed floor: a fixed 12 pt minimum overlaps
-    # consecutive lines on spreadsheets whose baselines are ~5.7 pt apart.
-    height = max(line_height * 1.15, max_font * 1.2, 2)
-    rect = fitz.Rect(bbox[0] - 0.5, bbox[1], bbox[2] + 0.5, bbox[1] + height)
+def _colour_rgb(value) -> tuple:
+    if not isinstance(value, int) or isinstance(value, bool):
+        value = 0
+    return (((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255)
 
-    try:
-        if layer is not None:
-            fitted = layer.add(rect, "".join(parts), _HTML_BASE_CSS,
-                               scale_low=0.5)
-        else:
-            fitted = page.insert_htmlbox(rect, "".join(parts),
-                                         css=_HTML_BASE_CSS,
-                                         scale_low=0.5)[0] >= 0
-        if not fitted:
-            # Both paths draw nothing when the text will not fit even at
-            # half size; the original behaved the same, silently. Say so.
-            log.debug("Run does not fit its box at half size, dropped: %r",
-                      "".join(s.get("t", "") for s in spans)[:60])
-    except Exception:  # noqa: BLE001
-        # Fall back to plain text placement rather than dropping the line.
-        for span in spans:
-            text = span.get("t", "")
-            if not text.strip():
-                continue
-            sb = span.get("b", bbox)
+
+class _TextPainter:
+    """The text of one page, set through MuPDF text writers, in reading order.
+
+    A writer holds text of one colour, and the spans go into it until the
+    colour changes: each write merges the writer's resources into the page's,
+    so a writer per span made a page of three hundred lines take seconds.
+    The order matters as much: a reader extracting the text follows the
+    order of the page's content, and with one writer per colour for the
+    whole page, a link in blue came out after all the black text around it
+    -- "sur . " and, at the end of the page, "https://www.7-zip.org/".
+    """
+
+    def __init__(self, page, fonts: _Fonts) -> None:
+        self.page = page
+        self.fonts = fonts
+        self.width = page.rect.width
+        self.height = page.rect.height
+        self._writer = None
+        self._colour = None
+
+    def draw(self, text: str, font, size: float, origin, colour) -> None:
+        try:
+            if self._writer is None or colour != self._colour:
+                self.commit()
+                self._writer = fitz.TextWriter(self.page.rect)
+                self._colour = colour
+            self._writer.append(origin, text, font=font, fontsize=size)
+        except Exception:  # noqa: BLE001
+            # One span MuPDF refuses costs that span, never the page.
+            log.debug("Span could not be set: %r", text[:60], exc_info=True)
+
+    def shaped(self, text: str, family, style, size: float, origin, right: float,
+               colour) -> None:
+        """Set text that needs shaping -- Arabic, Hebrew, Indic -- through HTML.
+
+        A text writer sets every character on its own, which leaves Arabic
+        letters unjoined and right-to-left runs in the wrong order. MuPDF's
+        HTML layout shapes them; it is slow, which matters little for text
+        this rare in the documents this program carries.
+        """
+        x, baseline = origin
+        rect = fitz.Rect(x - 0.5, baseline - _BOX_ASCENT * size,
+                         max(right, x + size) + 0.5, baseline + 0.6 * size)
+        css_family = {"t": "serif", "m": "monospace"}.get(family, "sans-serif")
+        weight = "bold" if style in ("B", "BI") else "normal"
+        slant = "italic" if style in ("I", "BI") else "normal"
+        escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        red, green, blue = (round(255 * v) for v in _colour_rgb(colour))
+        # Right to left when its first letter is, as the reading order says:
+        # set from the right edge of the box, where the source's text ended.
+        direction = "rtl" if _first_strong(text) in ("R", "AL") else "ltr"
+        html = (f'<div dir="{direction}" style="font-family:{css_family};font-size:{size}pt;'
+                f'font-weight:{weight};font-style:{slant};'
+                f'color:#{red:02x}{green:02x}{blue:02x};white-space:pre">{escaped}</div>')
+        # The text before it goes to the page first, in reading order.
+        self.commit()
+        try:
+            self.page.insert_htmlbox(rect, html, css=_SHAPED_CSS, scale_low=_FIT_MIN)
+        except Exception:  # noqa: BLE001
+            log.debug("Shaped span could not be set: %r", text[:60], exc_info=True)
+
+    def commit(self) -> None:
+        writer, self._writer = self._writer, None
+        if writer is not None:
             try:
-                page.insert_text(
-                    fitz.Point(sb[0], sb[3]),
-                    text,
-                    fontname=_FONT_FALLBACK.get(span.get("f", "R"), "helv"),
-                    fontsize=span.get("sz", 8),
-                )
+                writer.write_text(self.page, color=_colour_rgb(self._colour))
             except Exception:  # noqa: BLE001
-                log.debug("Span fallback failed", exc_info=True)
+                log.debug("Text could not be written", exc_info=True)
+
+
+# --- glyph widths --------------------------------------------------------------
+# MuPDF lays text out with each glyph's exact advance, then writes the font's
+# widths array (/W) with every width cut down to a whole thousandth of an em.
+# A reader places the glyphs by that array, not by the layout: in a font of
+# 2048 units to the em, Carlito's, each glyph loses half a thousandth on
+# average, and a line of eighty glyphs at 11 pt ended 0.45 pt short of where
+# it was set -- a third of a pixel at 100 dpi by its last word, enough to
+# move the edge of every letter after the first. Written back exact, the
+# widths put each glyph where the layout did; MuPDF, reading them back,
+# rounds each to a whole thousandth, and the roundings cancel out along a
+# line. Fonts of 1000 units, MuPDF's own base fonts and its Noto fallbacks,
+# have nothing to correct.
+
+_WIDTH_TOKEN = re.compile(rb"\[|\]|-?\d+(?:\.\d*)?|-?\.\d+")
+
+
+def _sfnt_advances(program: bytes):
+    """Units per em and advance widths of a TrueType or OpenType program.
+
+    None for anything else -- a bare CFF program, as MuPDF embeds its base
+    fonts, has no metrics table to read.
+    """
+    if len(program) < 12 or program[:4] not in (b"\x00\x01\x00\x00", b"OTTO", b"true"):
+        return None
+    count = int.from_bytes(program[4:6], "big")
+    tables = {}
+    for index in range(count):
+        record = program[12 + 16 * index:28 + 16 * index]
+        if len(record) < 16:
+            return None
+        tables[record[:4]] = (int.from_bytes(record[8:12], "big"),
+                              int.from_bytes(record[12:16], "big"))
+    try:
+        head, _ = tables[b"head"]
+        hhea, _ = tables[b"hhea"]
+        maxp, _ = tables[b"maxp"]
+        hmtx, hmtx_length = tables[b"hmtx"]
+    except KeyError:
+        return None
+    upem = int.from_bytes(program[head + 18:head + 20], "big")
+    metrics = int.from_bytes(program[hhea + 34:hhea + 36], "big")
+    glyphs = int.from_bytes(program[maxp + 4:maxp + 6], "big")
+    if (not upem or not metrics or 4 * metrics > hmtx_length
+            or hmtx + 4 * metrics > len(program)):
+        return None
+    # Each metric is an advance and a side bearing; glyphs past the last
+    # take its advance.
+    advances = [int.from_bytes(program[hmtx + 4 * i:hmtx + 4 * i + 2], "big")
+                for i in range(metrics)]
+    return upem, advances, max(glyphs, metrics)
+
+
+def _parse_widths(text: bytes) -> dict:
+    """A /W array as {cid: width}, from its two forms: c [w ...] and c c w."""
+    tokens = _WIDTH_TOKEN.findall(text)
+    if tokens[:1] == [b"["] and tokens[-1:] == [b"]"]:
+        tokens = tokens[1:-1]
+    widths: dict = {}
+    i = 0
+    while i < len(tokens):
+        first = int(float(tokens[i]))
+        if i + 1 < len(tokens) and tokens[i + 1] == b"[":
+            i += 2
+            while i < len(tokens) and tokens[i] != b"]":
+                widths[first] = float(tokens[i])
+                first += 1
+                i += 1
+            i += 1
+        elif i + 2 < len(tokens):
+            last, width = int(float(tokens[i + 1])), float(tokens[i + 2])
+            if last - first > 0xFFFF:
+                raise ValueError("width range too long")
+            for cid in range(first, last + 1):
+                widths[cid] = width
+            i += 3
+        else:
+            raise ValueError("truncated widths array")
+    return widths
+
+
+def _width_number(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".") or "0"
+
+
+def _format_widths(widths: dict) -> str:
+    """{cid: width} as a /W array: c c w for three cids or more of one
+    width in a row -- a monospaced font is a single range -- c [w ...] for
+    the others."""
+    runs: list = []  # [first cid, widths of the consecutive cids from it]
+    for cid in sorted(widths):
+        if runs and cid == runs[-1][0] + len(runs[-1][1]):
+            runs[-1][1].append(widths[cid])
+        else:
+            runs.append((cid, [widths[cid]]))
+    parts: list = []
+    for first, run in runs:
+        listed: list = []
+        start = 0
+        while start < len(run):
+            end = start
+            while end + 1 < len(run) and run[end + 1] == run[start]:
+                end += 1
+            if end - start >= 2:
+                if listed:
+                    parts.append(f"{first + start - len(listed)} [{' '.join(listed)}]")
+                    listed = []
+                parts.append(f"{first + start} {first + end} {_width_number(run[start])}")
+            else:
+                listed.extend(_width_number(w) for w in run[start:end + 1])
+            start = end + 1
+        if listed:
+            parts.append(f"{first + len(run) - len(listed)} [{' '.join(listed)}]")
+    return "[" + " ".join(parts) + "]"
+
+
+def _reference(doc, xref: int, key: str) -> int | None:
+    kind, value = doc.xref_get_key(xref, key)
+    match = re.search(r"(\d+) 0 R", value) if kind in ("xref", "array") else None
+    return int(match.group(1)) if match else None
+
+
+def _exact_widths(doc) -> int:
+    """Write each composite font's widths as its program gives them.
+
+    Only a width within one unit of the program's is replaced -- the cut
+    described above; any other was set on purpose and stays. Returns the
+    number of fonts changed.
+    """
+    changed = 0
+    seen: set = set()
+    for page in doc:
+        for xref, _ext, kind, *_ in page.get_fonts(full=True):
+            if xref in seen or kind != "Type0":
+                continue
+            seen.add(xref)
+            descendant = _reference(doc, xref, "DescendantFonts")
+            if descendant is None:
+                continue
+            gid_map = doc.xref_get_key(descendant, "CIDToGIDMap")
+            if gid_map[0] != "null" and gid_map != ("name", "/Identity"):
+                continue
+            descriptor = _reference(doc, descendant, "FontDescriptor")
+            if descriptor is None:
+                continue
+            program = None
+            for key in ("FontFile2", "FontFile3"):
+                stream = _reference(doc, descriptor, key)
+                if stream is not None:
+                    program = doc.xref_stream(stream)
+                    break
+            metrics = _sfnt_advances(program or b"")
+            if metrics is None:
+                continue
+            upem, advances, glyphs = metrics
+            kind_w, value = doc.xref_get_key(descendant, "W")
+            if kind_w == "xref":
+                array_xref = int(value.split()[0])
+                text = doc.xref_object(array_xref, compressed=True).encode("latin-1")
+            elif kind_w == "array":
+                array_xref, text = None, value.encode("latin-1")
+            else:
+                continue
+            try:
+                widths = _parse_widths(text)
+            except ValueError:
+                continue
+            exact = {}
+            for cid, width in widths.items():
+                # A cid past the font's last glyph names none; MuPDF lists
+                # them all for a monospaced font.
+                advance = advances[min(cid, len(advances) - 1)] * 1000 / upem
+                exact[cid] = (advance if cid < glyphs and abs(advance - width) < 1
+                              else width)
+            if all(abs(exact[cid] - widths[cid]) < 5e-4 for cid in widths):
+                continue
+            array = _format_widths(exact)
+            if array_xref is None:
+                doc.xref_set_key(descendant, "W", array)
+            else:
+                doc.update_object(array_xref, array)
+            changed += 1
+    return changed
+
+
+# The scripts whose letters change shape with their neighbours, or run right
+# to left: Hebrew to Sinhala, Thai to Myanmar, Khmer, and the presentation
+# forms of Hebrew and Arabic.
+_SHAPED_RANGES = ((0x0590, 0x0DFF), (0x0E00, 0x109F), (0x1780, 0x17FF),
+                  (0xFB1D, 0xFDFF), (0xFE70, 0xFEFF))
+_SHAPED_CSS = ("* { margin:0; padding:0; box-sizing:border-box; }"
+               "html, body { margin:0; padding:0; line-height:1; }")
+
+
+def _needs_shaping(text: str) -> bool:
+    return any(low <= ord(char) <= high for char in text for low, high in _SHAPED_RANGES)
+
+
+def _first_strong(text: str) -> str | None:
+    """The bidirectional class of the first letter that has a direction."""
+    for char in text:
+        kind = unicodedata.bidirectional(char)
+        if kind in ("L", "R", "AL"):
+            return kind
+    return None
+
+
+def _paint_line(painter: _TextPainter, line: dict, hung: bool = False) -> None:
+    """Set the spans of one line, each at the place its box gives it.
+
+    A span without a box of its own -- the only span of its line, as this
+    encoder writes it, or one an older encoder left without -- takes the
+    line's box if it is the first, else follows the span before it. Where
+    the box's right edge is real rather than opened to the page edge (see
+    _open_line_box), it is where the source's text ended: a span wider than
+    that is set smaller to end there, and a justified one has its word spaces
+    widened to reach it.
+
+    `hung` says the archive's boxes are this encoder's from 2.6 (the
+    manifest's "tl", see _TEXT_LAYOUT): hung from the baseline, and reaching
+    exactly as far as the text, its trailing spaces included. Otherwise their
+    makers are guessed from their shapes (see _span_baseline), and a span is
+    only shrunk when it overflows its box by more than _FIT_TOLERANCE.
+    """
+    line_box = line.get("b")
+    if not _is_box(line_box):
+        return
+    spans = [span for span in line.get("s", []) if isinstance(span, dict)
+             and isinstance(span.get("t"), str) and span["t"]]
+    pen = None         # where the text drawn so far ends
+    source_end = None  # where the source's did
+    for span in spans:
+        text = span["t"].replace("\t", " ")
+        size = span.get("sz", 8)
+        if not isinstance(size, (int, float)) or isinstance(size, bool) or not 0 < size < 2000:
+            size = 8
+        family, style = span.get("fa", "s"), span.get("f", "R")
+        family = family if isinstance(family, str) else "s"
+        style = style if isinstance(style, str) else "R"
+        font = painter.fonts.get(family, style)
+        colour = span.get("c", 0)
+        own = _is_box(span.get("b"))
+        box = span["b"] if own else line_box
+        x = box[0] if own or pen is None else pen
+        if (own and pen is not None and source_end is not None
+                and abs(box[0] - source_end) <= _ADJACENT_EM * size):
+            # Set against the span before in the source -- the full stop
+            # after a link, the rest of a word in another style: it follows
+            # the text as drawn, so the word stays whole whatever the
+            # difference of width.
+            x = pen
+        source_end = box[2] if own else None
+        if hung:
+            # Top and bottom each give the baseline; at whole points each is
+            # rounded on its own, and their mean halves the error.
+            baseline = (box[1] + _BOX_ASCENT * size + box[3] - _BOX_DESCENT * size) / 2
+        else:
+            baseline = _span_baseline(box, size, painter.height)
+        # Spaces are set as glyphs, the trailing ones too: a reader extracting
+        # the text finds them there, where a bare gap after "→" or a CJK
+        # character is not one MuPDF reads as a space. Widths are measured
+        # without the trailing ones, which put no ink on the page.
+        visible = text.rstrip()
+        if not visible.strip():
+            if pen is not None:
+                pen += font.text_length(text, fontsize=size)
+            continue
+        if _needs_shaping(visible):
+            right = box[2] if box[2] < painter.width - 0.6 else painter.width
+            painter.shaped(visible, family, style, size, (x, baseline), right, colour)
+            pen = x + font.text_length(text, fontsize=size)
+            continue
+        natural = font.text_length(visible, fontsize=size)
+        full = font.text_length(text, fontsize=size)
+        pen = x + full
+        if natural <= 0 or box[2] >= painter.width - 0.6 or not (own or len(spans) == 1):
+            painter.draw(text, font, size, (x, baseline), colour)
+            continue
+        # Where the source's last glyph ended.
+        width = box[2] - x - (full - natural if hung else 0.0)
+        if (natural > width + _fit_slack(box)) if hung else (width < natural * (1 - _FIT_TOLERANCE)):
+            # Set smaller, on the same baseline: squeezing the glyphs instead
+            # measured the same on ten documents, and needs a text writer of
+            # its own for every span.
+            scale = max(_FIT_MIN, width / natural)
+            painter.draw(text, font, size * scale, (x, baseline), colour)
+            pen = x + full * scale
+            continue
+        body = visible.lstrip(" ")
+        words = body.split(" ")
+        gaps = len(words) - 1
+        space = font.text_length(" ", fontsize=size)
+        # An older box may or may not take in the spaces ending its text.
+        reach = width - natural if hung else box[2] - x - max(full, natural)
+        extra = (reach / gaps if gaps >= _JUSTIFY_MIN_GAPS and reach > _justify_reach(box)
+                 else 0.0)
+        if extra <= 0 or extra > _JUSTIFY_MAX_SPACE * space:
+            painter.draw(text, font, size, (x, baseline), colour)
+            continue
+        cursor = x + (len(visible) - len(body)) * space
+        for index, word in enumerate(words):
+            # Each word is set with the space after it, the last with the
+            # text's trailing ones; the extra goes between.
+            word += " " if index < gaps else text[len(visible):]
+            if word.strip():
+                painter.draw(word, font, size, (cursor, baseline), colour)
+            cursor += font.text_length(word, fontsize=size) + (extra if index < gaps else 0.0)
+        pen = max(pen, cursor)
+
+
+def _is_box(value) -> bool:
+    return (isinstance(value, (list, tuple)) and len(value) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value))
 
 
 def _draw_checkmarks(page, checks: list) -> None:

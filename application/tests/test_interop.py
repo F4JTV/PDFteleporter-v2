@@ -77,6 +77,10 @@ CASES = [
     ("pitch", "fixed_pitch_cells", {"quality": "ultra_low", "compact": True}),
     ("overlooked", "overlooked_spaces", {"quality": "medium"}),
     ("overlooked", "overlooked_spaces", {"quality": "ultra_low", "compact": True}),
+    # Double borders as LibreOffice paints them, some clipped away entirely,
+    # and a fill painted through a clip far smaller than itself.
+    ("clipped", "clipped_borders", {"quality": "medium"}),
+    ("clipped", "clipped_borders", {"quality": "ultra_low", "compact": True}),
     # Compact archives (.psdz), documents without images only.
     ("report_3p", "text_report", {"quality": "ultra_low", "compact": True}),
     ("report_3p", "text_report", {"quality": "medium", "compact": True}),
@@ -162,10 +166,11 @@ class TestCompactSample(unittest.TestCase):
             classic, _ = engine.pdf_to_archive(path, quality="medium")
         rebuilt, info = engine.archive_to_pdf(sample)
         self.assertTrue(info["crc_ok"])
+        # The encoder has moved on since -- boxes hung from the baseline in
+        # 2.6 -- and the sample is read by the rules of its own day.
         self.assertEqual(TestOriginalDecoder._words(rebuilt),
                          TestOriginalDecoder._words(engine.archive_to_pdf(classic)[0]))
-        self.assertEqual(psdi.read_compact_struct(sample).manifest,
-                         psdi.read_struct(classic).manifest)
+        self.assertNotIn("tl", psdi.read_compact_struct(sample).manifest)
 
 
 class TestLegacyDecoder(unittest.TestCase):
@@ -233,7 +238,9 @@ class TestLegacyDecoder(unittest.TestCase):
                         box = span.get("b", line_box)
 
                         self.assertIn(font, ("R", "B", "I", "BI"))
-                        self.assertIn(family, ("s", "t", "m"))
+                        # "c", Calibri's class, since 2.6 and the
+                        # original's 2.2; older readers take it for "s".
+                        self.assertIn(family, ("s", "t", "m", "c"))
                         self.assertIsInstance(colour, int)
                         self.assertEqual(len(box), 4)
                         self.assertIn("t", span, "text is never omitted")
@@ -385,13 +392,44 @@ class TestOriginalDecoder(unittest.TestCase):
             doc.close()
 
     def test_every_archive_rebuilds_with_the_same_text(self):
+        # Compatibility-normalised: its decoder lays text out as HTML, which
+        # draws "fi" with the ligature glyph; this one sets the two letters.
+        import unicodedata
+
         for name, path in self.paths.items():
             for quality in ("ultra_low", "medium", "high"):
                 with self.subTest(doc=name, quality=quality):
                     data, _ = engine.pdf_to_archive(path, quality=quality)
                     theirs, info = self.original.archive_to_pdf(data)
                     ours, _ = engine.archive_to_pdf(data)
-                    self.assertEqual(self._words(theirs), self._words(ours))
+                    self.assertEqual(
+                        [unicodedata.normalize("NFKC", w) for w in self._words(theirs)],
+                        [unicodedata.normalize("NFKC", w) for w in self._words(ours)])
+
+    def test_text_lands_on_its_baseline(self):
+        # Boxes hung from the baseline: its decoder sets a line 0.8 em below
+        # the top of the box, which is now where the baseline is. MuPDF's
+        # own box put a Helvetica line 0.27 em too high.
+        path = fixtures.text_report(os.path.join(self._tmp.name, "baselines.pdf"), pages=1)
+        with open(path, "rb") as handle:
+            source = self._baselines(handle.read())
+        data, _ = engine.pdf_to_archive(path, quality="medium")
+        rebuilt = self._baselines(self.original.archive_to_pdf(data)[0])
+        self.assertEqual(len(source), len(rebuilt))
+        for wanted, found in zip(source, rebuilt):
+            self.assertAlmostEqual(found, wanted, delta=0.06)
+
+    @staticmethod
+    def _baselines(pdf_bytes):
+        import pymupdf
+
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            return sorted(round(line["spans"][0]["origin"][1], 2)
+                          for block in doc[0].get_text("dict")["blocks"]
+                          for line in block.get("lines", []))
+        finally:
+            doc.close()
 
     def _render(self, pdf_bytes):
         import pymupdf
@@ -429,10 +467,10 @@ class TestOriginalDecoder(unittest.TestCase):
             doc.close()
 
     def test_open_line_boxes_leave_every_glyph_in_place(self):
-        # A line that fits its box is stored with the page corner as its
-        # bottom-right. The original draws each line through a temporary page
-        # of the box's size, so the box enters its matrices: a glyph may move
-        # by float rounding, never by more.
+        # A line that fits its box is stored with the page's right edge as its
+        # own. The original draws each line through a temporary page of the
+        # box's size, so the box enters its matrices: a glyph may move by
+        # float rounding, two thousandths of a point, never by more.
         for name in ("text_report", "bordered_sheet"):
             for quality in ("ultra_low", "medium"):
                 with self.subTest(doc=name, quality=quality):
@@ -447,9 +485,9 @@ class TestOriginalDecoder(unittest.TestCase):
                     b = self._glyphs(self.original.archive_to_pdf(exact)[0])
                     self.assertEqual([(g[0], g[1]) for g in a], [(g[0], g[1]) for g in b])
                     for ga, gb in zip(a, b):
-                        self.assertAlmostEqual(ga[2][0], gb[2][0], delta=0.001)
-                        self.assertAlmostEqual(ga[2][1], gb[2][1], delta=0.001)
-                        self.assertAlmostEqual(ga[3], gb[3], delta=0.001)
+                        self.assertAlmostEqual(ga[2][0], gb[2][0], delta=0.002)
+                        self.assertAlmostEqual(ga[2][1], gb[2][1], delta=0.002)
+                        self.assertAlmostEqual(ga[3], gb[3], delta=0.002)
 
     def test_words_placed_by_cursor_moves_reach_its_stations_spaced(self):
         # The spaces put back between words that LaTeX placed by cursor moves
@@ -493,6 +531,33 @@ class TestOriginalDecoder(unittest.TestCase):
                 self.assertNotEqual([engine._normalize_text(w) for w in misread], expected.split(),
                                     "the original read them right; this fixture no longer "
                                     "reproduces the defect")
+
+    def test_calibri_class_and_layout_key_reach_its_stations(self):
+        # "fa": "c" and the manifest's "tl" are new to its decoder: it sets
+        # the first in its sans serif, as it set Calibri before, and never
+        # reads the second.
+        path = fixtures.placeholder_font_names(
+            os.path.join(self._tmp.name, "printed.pdf"),
+            engine.resource_path("psditool", "fonts", "Carlito-Bold.ttf"))
+        data, _ = engine.pdf_to_archive(path, quality="medium")
+        manifest = psdi.read_struct(data).manifest
+        self.assertEqual(manifest["tl"], engine._TEXT_LAYOUT)
+        self.assertEqual(manifest["pages"][0]["tb"][0]["l"][0]["s"][0]["fa"], "c")
+        theirs, _ = self.original.archive_to_pdf(data)
+        self.assertEqual(self._words(theirs), ["Bilan", "de", "situation", "Moyens", "engagés"])
+
+    def test_hidden_borders_stay_hidden_at_its_stations(self):
+        # Border strips clipped away entirely in the source are not in the
+        # archive at all, so no decoder can draw them; the strips that show
+        # are plain boxes, which its decoder draws like any other.
+        path = fixtures.clipped_borders(os.path.join(self._tmp.name, "clipped.pdf"))
+        data, _ = engine.pdf_to_archive(path, quality="medium")
+        theirs = self.original.archive_to_pdf(data)[0]
+        pix = self._render(theirs)
+        self.assertGreater(pix.pixel(int(100 * 2), int(191.7 * 2))[0], 200, "hidden strip drawn")
+        self.assertLess(pix.pixel(int(100 * 2), int(341.7 * 2))[0], 200, "shown strip missing")
+        self.assertLess(pix.pixel(int(500 * 2), int(342 * 2))[0], 200, "rule covered by the fill")
+        self.assertEqual(self._words(theirs), self._words(engine.archive_to_pdf(data)[0]))
 
     def test_compact_archives_are_refused_by_number(self):
         # A .psdz reaching a station that runs the original must be turned

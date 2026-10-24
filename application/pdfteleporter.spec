@@ -82,6 +82,19 @@ if _missing_codecs:
 # graph cannot see.
 _pillow_hidden = ["PIL.AvifImagePlugin", "PIL.WebPImagePlugin", "PIL._avif", "PIL._webp"]
 
+# The rebuild sets Calibri's class in Carlito (SIL Open Font License 1.1),
+# which ships with its licence beside it, as the OFL requires. The engine finds
+# the files under _MEIPASS/psditool/fonts. A build without them would still
+# rebuild every page, in Helvetica, so their absence is caught here.
+_FONT_DIR = os.path.join("psditool", "fonts")
+_FONT_FILES = ["Carlito-Regular.ttf", "Carlito-Bold.ttf", "Carlito-Italic.ttf",
+               "Carlito-BoldItalic.ttf", "OFL.txt"]
+_missing_fonts = [name for name in _FONT_FILES
+                  if not os.path.exists(os.path.join(_FONT_DIR, name))]
+if _missing_fonts:
+    raise SystemExit("psditool/fonts is missing: " + ", ".join(_missing_fonts))
+_fonts = [(os.path.join(_FONT_DIR, name), _FONT_DIR) for name in _FONT_FILES]
+
 # PyMuPDF ships no PyInstaller hook of its own, and PyInstaller bundles none
 # for it, so nothing collects its compiled extensions automatically. Name them
 # explicitly.
@@ -167,7 +180,7 @@ a = Analysis(
     ['pdfteleporter.py'],
     pathex=[],
     binaries=_pymupdf_binaries,
-    datas=[('assets/pdfteleporter.ico', 'assets')] + _qt_translations,
+    datas=[('assets/pdfteleporter.ico', 'assets')] + _fonts + _qt_translations,
     hiddenimports=_pymupdf_hidden + _pillow_hidden,
     hookspath=[],
     runtime_hooks=[],

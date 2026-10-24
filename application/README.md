@@ -7,7 +7,7 @@ Winlink Express), et les recompose en PDF lisibles à la réception.
 Un SITREP de 600 ko qui demanderait un quart d'heure en VARA HF tient dans
 environ 120 ko et passe en trois minutes, sa mise en page intacte à l'arrivée.
 Entre stations équipées de la version 2.5.0 ou plus, l'archive compacte `.psdz`
-retire encore 20 à 45 % de ce poids.
+retire encore 18 à 55 % de ce poids.
 
 ---
 
@@ -34,6 +34,15 @@ fonction près le bytecode 1.0.6 (`reference/NOTES-EXTRACTION.md` détaille la
 comparaison). Quand ce document parle de « l'original », il s'agit de la 2.1.0 ;
 ce qui ne vaut que pour la 1.0.6 est signalé.
 
+F1GBD a publié depuis une version 2.2.0 (octobre 2026), réécrite sur d'autres
+bibliothèques et distribuée sous une nouvelle licence, PolyForm Noncommercial
+1.0.0. Cette licence n'est pas compatible avec la GPL : rien de la 2.2.0 n'est
+repris ici, et son code n'a pas été lu. Elle a seulement été exécutée à part,
+en boîte noire, pour vérifier que les deux programmes lisent les archives l'un
+de l'autre (voir la version 2.6.0). Ce dérivé reste fondé sur les versions
+publiées sous GPL v3, jusqu'à la 2.1.0 ; la 2.2.0 est toujours nommée
+explicitement.
+
 Ce dérivé reste sous **GNU GPL v3**, comme l'exige la licence de l'original.
 PyMuPDF, utilisé par le moteur, est sous AGPL v3.
 
@@ -50,13 +59,20 @@ suivante et n'est produit que sur demande explicite (voir « Archives compactes
 espaces rétablies entre les mots (voir « Correctifs »), et reste lisible tel
 quel par la version de F1GBD.
 
+La 2.6.0 accroche les boîtes de texte à la ligne de base et signale ces boîtes
+par une clé facultative du manifeste, `tl`, pour que la 2.2.0 de F1GBD, qui pose
+le texte depuis le bas des boîtes, lise nos archives correctement ; elle lit en
+retour les traits que la 2.2.0 écrit (voir « Format d'archive »).
+
 Cette compatibilité est vérifiée contre le vrai moteur de F1GBD, pas contre
 l'idée qu'on s'en fait : `reference/tools/bench.py` charge `psdi_lib` 2.1.0
 directement depuis son bytecode et fait recomposer chaque archive de chaque côté
 par chaque décodeur. Huit documents de test, quatre préréglages, quatre sens :
 les 128 recompositions passent (`reference/bench/bench.json`). La suite de tests
 fait de même à chaque exécution quand `reference/` est présent
-(`TestOriginalDecoder`).
+(`TestOriginalDecoder`). La 2.2.0 n'est pas dans `reference/`, sa licence n'y
+ayant pas sa place : les échanges avec elle ont été vérifiés en l'exécutant à
+part, sur onze documents, dans les deux sens.
 
 ## Périmètre
 
@@ -321,7 +337,10 @@ visible en réception :
 - **Interligne des très petites polices.** Une hauteur de rendu proportionnelle
   (`line_height × 1,15` ou `fontsize × 1,20`, le maximum des deux) et une marge
   horizontale d'un demi-point évitent le chevauchement des lignes et le
-  débordement de cellule sur les tableaux Excel à polices de ~4 pt.
+  débordement de cellule sur les tableaux Excel à polices de ~4 pt. *Depuis la
+  2.6.0, notre décodeur pose chaque fragment sur sa ligne de base sans passer
+  par une boîte HTML ; ce réglage reste celui du décodeur de F1GBD 2.1.0, pour
+  lequel l'encodeur vérifie toujours qu'une ligne tient.*
 
 ---
 
@@ -339,6 +358,7 @@ visible en réception :
 | Installateur Windows (depuis la 2.1.0) ou archive 7z portable | Installateur Inno Setup 7, ressources de version Windows |
 | Couche TNC/VARA et gestionnaire de transfert embarqués | Compression seule ; l'émission est laissée à Winlink |
 | Un format, `.psdi` | `.psdi` inchangé, et au choix `.psdz`, compact (2.5.0) |
+| Texte recomposé en HTML, une boîte par fragment, en Helvetica pour Calibri | Texte posé sur sa ligne de base, dans des polices aux chasses de l'original, Carlito pour Calibri (2.6.0) |
 
 Le moteur d'origine était déjà une bibliothèque autonome sans dépendance à
 l'IHM — l'auteur l'avait conçue pour être appelée depuis son application TCQ.
@@ -351,19 +371,19 @@ simple conversion.
 Mesuré contre le moteur de F1GBD lui-même, chargé depuis son bytecode
 (`reference/bench/`), sur les documents de test de la suite :
 
-| Document | Préréglage | `psdi_lib` 2.1.0 | Ici (2.4.0) | Écart |
-|---|---|---|---|---|
-| Rapport texte, 3 pages | `ultra_low`, `low` | 2 963 | 1 749 | −41 % |
-| Rapport texte, 3 pages | `medium`, `high` | 2 963 | 1 813 | −39 % |
-| Rapport riche (photos, tableau à filets, liens) | `ultra_low` | 4 657 | 1 791 | −62 % |
-| Rapport riche | `medium` | 9 018 | 5 709 | −37 % |
-| Rapport riche | `high` | 8 306 | 7 971 | −4 % |
-| Tableau de 12 lignes | `low` | 887 | 493 | −44 % |
-| Graphique et photographie | `ultra_low` | 13 752 | 6 665 | −52 % |
-| Graphique et photographie | `medium` | 24 616 | 21 845 | −11 % |
-| Bordures Excel et LibreOffice | `ultra_low` | 1 078 | 702 | −35 % |
-| Bordures Excel et LibreOffice | `medium` | 1 078 | 725 | −33 % |
-| Page pivotée (mode image) | `low` | 59 848 | 59 665 | −0,3 % |
+| Document | Préréglage | `psdi_lib` 2.1.0 | Ici (2.4.0) | Ici (2.6.0) | Écart (2.6.0) |
+|---|---|---|---|---|---|
+| Rapport texte, 3 pages | `ultra_low`, `low` | 2 963 | 1 749 | 1 787 | −40 % |
+| Rapport texte, 3 pages | `medium`, `high` | 2 963 | 1 813 | 1 857 | −37 % |
+| Rapport riche (photos, tableau à filets, liens) | `ultra_low` | 4 657 | 1 791 | 1 800 | −61 % |
+| Rapport riche | `medium` | 9 018 | 5 709 | 5 722 | −37 % |
+| Rapport riche | `high` | 8 306 | 7 971 | 7 984 | −4 % |
+| Tableau de 12 lignes | `low` | 887 | 493 | 518 | −42 % |
+| Graphique et photographie | `ultra_low` | 13 752 | 6 665 | 6 693 | −51 % |
+| Graphique et photographie | `medium` | 24 616 | 21 845 | 21 876 | −11 % |
+| Bordures Excel et LibreOffice | `ultra_low` | 1 078 | 702 | 756 | −30 % |
+| Bordures Excel et LibreOffice | `medium` | 1 078 | 725 | 754 | −30 % |
+| Page pivotée (mode image) | `low` | 59 848 | 59 665 | 59 665 | −0,3 % |
 
 Les gains viennent du manifeste et, depuis la 2.3.0, des images qui ne sont pas
 des photographies. Là où le JPEG d'une photographie fait tout — mode image, ou
@@ -373,7 +393,11 @@ valent, ce qui est attendu : les paramètres JPEG sont ceux du format. Depuis la
 bordures à `medium`, qui porte pourtant les traits du tableau LibreOffice que
 l'original ne stocke pas du tout (voir la 2.3.0 et la 2.4.0). Sur ces
 documents, la 2.5.0 émet les mêmes `.psdi` octet pour octet ; l'archive
-compacte `.psdz` est mesurée à part, plus bas.
+compacte `.psdz` est mesurée à part, plus bas. La 2.6.0 y ajoute 0,1 à 8 % —
+ses boîtes de texte accrochées à la ligne de base —, et la recomposition s'y
+rapproche nettement de l'original, par les deux décodeurs : sur le rapport
+texte, l'écart moyen de rendu tombe de 6,5 à 1,0 niveau de gris par le nôtre,
+de 6,5 à 2,7 par celui de F1GBD 2.1.0 (`reference/bench/bench.json`).
 
 Le détail de chaque changement, mesuré isolément, suit. Les pourcentages de ce
 tableau-ci sont des avant/après sur notre propre moteur, pas des écarts à
@@ -495,6 +519,10 @@ immobile ne dépasse 60 ms.
 Le moteur 2.1.0 de F1GBD emprunte toujours ce chemin, un `insert_htmlbox` par
 fragment, et le banc le mesure : 1,4 à 1,8 s pour recomposer le rapport de
 trois pages, contre 0,13 à 0,23 s ici, à archive égale.
+
+*Depuis la 2.6.0, le texte ne passe plus par la mise en page HTML, hormis les
+écritures qui demandent d'être mises en forme — arabe, hébreu, écritures
+indiennes : voir la 2.6.0. La barre de progression, elle, est inchangée.*
 
 ### Étiquettes d'axe vectorisées (version 2.2.2)
 
@@ -735,6 +763,10 @@ de plus. Le coin de la page est aussi le choix le plus court : ramener le bas
 de la boîte au haut de la ligne coûterait 2 à 4 % de plus, et le décodeur de
 F1GBD, qui découpe chaque ligne à sa boîte, y perdrait le bas des lettres.
 
+*Depuis la 2.6.0, la boîte ne s'ouvre plus que vers la droite. Le décodeur de
+F1GBD 2.2 pose une ligne depuis le bas de sa boîte : toutes les lignes ouvertes
+jusqu'au coin de la page s'y empilaient au pied de la page (voir la 2.6.0).*
+
 **Les coordonnées sont écrites à largeur fixe.** `84.100` au lieu de `84.1`,
 `  84` au lieu de `84` : JSON lit les mêmes nombres, et le manifeste reste du
 JSON valide. Mais chaque rectangle a maintenant la longueur du précédent, et
@@ -928,6 +960,301 @@ ce verbe une commande qu'il n'a plus. Le menu se lisait donc toujours absent —
 commande du verbe de recomposition, qui en a une dans toutes les dispositions
 que cet outil a écrites.
 
+### Recomposition fidèle et échanges avec F1GBD 2.2 (version 2.6.0)
+
+F1GBD a publié en octobre 2026 la version 2.2.0 de son programme. Le moteur y
+est réécrit sur pypdfium2, pdfminer.six, pypdf et reportlab au lieu de
+PyMuPDF, l'interface passe à PySide6, et la licence change : **PolyForm
+Noncommercial 1.0.0**, gratuite pour tout usage non commercial. Le format
+`.psdi` est annoncé inchangé.
+
+Cette licence n'est pas compatible avec la GPL v3 de ce dérivé : rien de la
+2.2.0 ne peut y entrer. Son code n'a donc pas été lu. Le programme a été
+installé à part et exécuté en boîte noire, comme le ferait une station qui
+échange avec lui : ses archives et ses PDF recomposés ont été observés,
+mesurés et comparés aux nôtres. Le format reste le contrat commun, et ce que
+contient une archive est une donnée, pas du code.
+
+Le point de départ est une comparaison faite par un utilisateur sur deux
+fiches de tableur réelles, à « Moyenne », tailles en octets :
+
+| Fiche | F1GBD 2.2 | 2.5.0 `.psdi` | 2.5.0 `.psdz` |
+|---|---|---|---|
+| FM/SAT | 6 863 | 14 641 | 12 373 |
+| HF | 4 230 | 4 568 | 3 809 |
+
+Sur ces fiches comme sur des documents Word, la 2.2.0 recomposait aussi des
+pages plus proches de l'original. Avec un défaut : sur la fiche FM/SAT, un
+rectangle que l'original ne montre pas.
+
+**Un tableau devenu image.** Ces fiches sortent de LibreOffice, qui dessine
+une bordure double en trois bandes d'un cinquième de point — noire, blanche,
+noire —, chacune un contour fermé de quatre segments. Les petits côtés de ces
+bandes échouaient au test de longueur des rectangles : chaque bande devenait
+une « illustration », et le tableau autour d'elles une image. Dans l'archive
+FM/SAT de la 2.5.0, cette image pesait 10 673 octets sur 14 641, et 36 des 212
+lignes de texte de la page y étaient passées en pixels — ni sélectionnables,
+ni lues par la recherche. Un petit côté compte désormais quand il court droit,
+à un dixième de pente près ; un côté diagonal ou de longueur nulle rompt
+toujours la forme.
+
+**Ce qui ne se voit pas ne part plus.** LibreOffice peint aussi des bandes
+qu'il masque aussitôt par un chemin de découpe : 72 des 291 tracés de la fiche
+FM/SAT et 36 des 156 de la fiche HF ne sont visibles nulle part. Le moteur lit
+maintenant la découpe de chaque tracé dans la liste étendue de MuPDF
+(`get_drawings(extended=True)` : le cadre de chaque découpe et le niveau
+d'imbrication de chaque entrée) et la rapporte au tracé par son numéro
+d'ordre. Un tracé entièrement hors de sa découpe est omis. Un rectangle qui
+la déborde est rogné : son remplissage à la découpe, son contour en filets
+coupés au bord (Liang-Barsky). Un débord de moins d'un demi-point est laissé
+tel quel : plus étroit qu'un pixel à tous les préréglages, il ne changerait
+que des octets. Sur 58 documents de test, la découpe cache entièrement 456
+tracés et en coupe 234 ; les fiches et un document pivoté en ont l'essentiel.
+
+| Fiche, « Moyenne » | F1GBD 2.2 | 2.5.0 `.psdi` | 2.6.0 `.psdi` | 2.5.0 `.psdz` | 2.6.0 `.psdz` |
+|---|---|---|---|---|---|
+| FM/SAT | 6 863 | 14 641 | 5 091 | 12 373 | 3 944 |
+| HF | 4 230 | 4 568 | 3 076 | 3 809 | 2 338 |
+
+Toute la page est de nouveau du texte : la part des mots de l'original
+retrouvés à la recomposition passe de 64 % à 100 % sur la fiche FM/SAT, de
+79 % à 100 % sur la fiche HF.
+
+**Le rectangle de trop.** L'encodeur de la 2.2 garde les bandes masquées, et
+son décodeur les dessine : c'est le cadre qui n'existe pas dans l'original.
+Une archive de la 2.6.0 ne les contient plus, si bien que le décodeur de la
+2.2 ne le dessine pas non plus. Une archive écrite par la 2.2 le contient
+toujours, et tout décodeur, celui-ci compris, le dessine : il fait partie de
+l'archive.
+
+**Deux incompatibilités, une dans chaque sens.** Le banc a d'abord montré que
+les deux programmes ne se lisaient plus correctement :
+
+- *Nos archives 2.4 et 2.5 chez F1GBD 2.2 : le texte au pied de la page.* La
+  2.4.0 ouvrait la boîte d'une ligne qui tient en taille réelle jusqu'au coin
+  bas droit de la page (voir la 2.4.0) — ce qu'ignoraient le décodeur 2.1.0 de
+  F1GBD et le nôtre, qui posent le texte depuis le haut de la boîte. Celui de
+  la 2.2 le pose depuis le bas, 0,21 em au-dessus : toutes ces lignes
+  s'empilaient au pied de la page, illisibles. Une station 2.2 qui reçoit un
+  `.psdi` d'une 2.4.0 à 2.5.x reçoit donc un document illisible ; la mesure
+  d'écart, qui compte des pixels, le sous-estime, les mots étant tous là.
+- *Les archives de F1GBD 2.2 chez nous : la recomposition s'arrêtait.* La 2.2
+  écrit chaque trait en entrée `{"t": "line", "p": [x0, y0, x1, y1, …]}`, une
+  polyligne. La 2.5.0 cherchait `r`, la forme de 2.2.x, et s'arrêtait sur une
+  `KeyError` au premier trait : 6 des 11 archives de la 2.2 du banc — toutes
+  celles qui contiennent un trait — ne pouvaient pas être ouvertes. Elle ignorait
+  aussi la classe de police `c` (Calibri) et posait ce texte en Helvetica,
+  plus large d'un dixième, donc réduit.
+
+**Des boîtes lisibles par tous les décodeurs.** Les boîtes de texte sont
+désormais accrochées à la ligne de base : le haut 0,8 em au-dessus, le bas
+0,21 em en dessous. Le décodeur 2.1.0 de F1GBD, celui de la 2.2 et le nôtre
+retrouvent tous la ligne de base, chacun par son bord. La boîte d'une ligne
+qui tient ne s'ouvre plus que vers la droite, jusqu'au bord de la page : son
+bas reste le sien. La boîte que MuPDF donne lui-même, celle de la police, ne
+convenait à aucun : une ligne en Helvetica, haute de 1,07 em au-dessus de sa
+ligne de base, sortait 0,27 em trop haut chez tous. Une clé de manifeste,
+`"tl": 1`, signale ces boîtes à notre décodeur, qui pose alors le texte sans
+rien deviner ; les autres l'ignorent, comme toute clé qu'ils ne connaissent
+pas — vérifié sur les décodeurs 2.1.0 et 2.2. Les archives plus anciennes,
+de quelque programme qu'elles viennent, sont lues d'après la forme de leurs
+boîtes.
+
+Dans le `.psdz`, une ligne accrochée haute de 1,01 em de son plus grand texte
+prend pour bas celui de la page, comme une boîte ouverte de la 2.5.0 : une
+station 2.5.0 la lit comme avant et pose le texte au même endroit, et la 2.6.0
+recalcule le vrai bas. Une boîte dont le bas est réellement celui de la page
+n'en porte jamais la marque, si bien que la relecture est exacte.
+
+**Le texte posé sur sa ligne de base, dans une police aux mêmes chasses.**
+Jusqu'à la 2.5.0, chaque ligne passait par la mise en page HTML de MuPDF,
+accrochée au haut de sa boîte, dans la famille CSS de sa classe. Calibri, la
+police par défaut de Word, y était posé en Helvetica, plus large d'un
+dixième, donc réduit. Désormais chaque fragment est posé à sa place, sur sa
+ligne de base, par les « text writers » de MuPDF, dans une police aux chasses
+de celle de l'original : Nimbus Sans, Nimbus Roman et Nimbus Mono, les polices de base
+de MuPDF, pour Helvetica et Arial, Times et Times New Roman, Courier et
+Courier New ; **Carlito**, embarquée avec le programme, pour Calibri. Un
+fragment plus large que sa boîte est posé plus petit, jusqu'à moitié ; une
+ligne justifiée retrouve sa largeur par ses espaces, jamais plus d'une espace
+et demie de plus chacune ; deux fragments qui se touchaient à l'origine — un
+lien et son point final — se suivent. Un glyphe absent d'une police vient des
+polices de secours de MuPDF, comme auparavant. Seuls l'arabe, l'hébreu et les
+écritures indiennes ou d'Asie du Sud-Est passent encore par la mise en page
+HTML, qui seule sait lier leurs lettres et poser un texte de droite à gauche.
+Les polices sont réduites aux glyphes utilisés : un bulletin de cinq pages
+pesait 1,3 Mo avec Carlito entier, 170 ko ainsi. Les onze documents mesurés
+plus bas se recomposent en 3,0 s au lieu de 3,5 s.
+
+**Les polices reconnues sous leur vrai nom.** « Microsoft Print to PDF »
+nomme toutes les polices d'un document `CIDFont+F1`, `CIDFont+F2`… Le vrai
+nom, Calibri ou Times New Roman, est lu dans le programme de police lui-même,
+et la graisse et l'italique dans les attributs que MuPDF tire de son
+descripteur. Calibri reçoit sa propre classe, `c`, celle que la 2.2 de F1GBD
+écrit aussi : un décodeur qui ne la connaît pas — le 2.1.0, le nôtre jusqu'à
+la 2.5.0 — retombe sur sa police sans empattement, comme avant. Les polices
+LaTeX (Computer Modern, Latin Modern) sont reconnues pour ce qu'elles sont,
+avec empattements, gras et italique ; elles passaient jusqu'ici en
+Helvetica, romain le plus souvent.
+
+**Les puces des polices de symboles.** Word écrit les puces et les flèches de
+Wingdings et de Symbol dans la zone privée d'Unicode : U+F0D8 pour « ➢ »,
+U+F0E0 pour « → ». Hors de leur police, ces codes ne dessinent rien. Ils sont
+traduits à l'encodage en caractères ordinaires (`psditool/symbols.py`, d'après
+les tables d'Adobe pour Symbol et le dessin des glyphes pour Wingdings), que
+tout décodeur sait poser. L'espace tapée entre une puce et son texte, à une
+tabulation de distance, est rendue à la puce : MuPDF ne devine aucune espace
+après « ➢ » ou « → », et la recomposition se lisait « ➢le » là où l'original
+se lit « le ».
+
+**Chaque glyphe à sa place.** MuPDF met le texte en page avec la chasse exacte
+de chaque glyphe, puis écrit dans le PDF les chasses de la police tronquées
+au millième d'em. Or un lecteur place les glyphes d'après ces chasses
+écrites : en Carlito, police de 2 048 unités par em, chaque glyphe perd un
+demi-millième d'em en moyenne, et une ligne de quatre-vingts glyphes à 11 pt
+finissait 0,45 pt trop tôt — un tiers de pixel à 100 dpi au dernier mot, de
+quoi déplacer le bord de chaque lettre. Les chasses sont réécrites exactes à
+l'enregistrement, lues dans le programme de police (`_exact_widths`). Les
+polices de 1 000 unités, celles de base de MuPDF et ses polices de secours,
+n'ont rien à corriger. Le bilan préfectoral passe ainsi de 1,94 à 1,63 %
+d'écart à l'original, la fiche de présentation Word de 1,89 à 1,47 %.
+
+**Le texte dans l'ordre de lecture.** Un lecteur qui extrait le texte — copier,
+rechercher, lire à voix haute — suit l'ordre du contenu de la page. Le texte
+est écrit dans l'ordre où il se lit, un changement de couleur ouvrant un
+nouveau bloc, plutôt qu'en un bloc par couleur pour toute la page : un lien en
+bleu sortait sinon après tout le texte noir qui l'entoure.
+
+**Ce que le décodeur tolère.** Une archive arrive par radio, écrite par des
+programmes que celui-ci ne connaît pas. Une entrée de page qu'il ne sait pas
+dessiner — un trait sans coordonnées lisibles, une image sans cadre, une
+coche mal formée, un bloc de texte qui n'en est pas un — est désormais sautée,
+et le reste de la page dessiné ; la 2.5.0 abandonnait toute la recomposition
+au premier. `TestForeignEntries` éprouve chaque liste d'une page de cette
+façon.
+
+**Résultats.** Sur les sept documents d'exercice de cette comparaison et les
+quatre des sections précédentes, à « Moyenne », tailles en octets :
+
+| Document | F1GBD 2.2 | 2.5.0 `.psdi` | 2.6.0 `.psdi` | 2.6.0 / F1GBD | 2.6.0 `.psdz` | `.psdz` / F1GBD |
+|---|---|---|---|---|---|---|
+| Formulaire SITREP, 2 pages | 9 199 | 8 449 | 8 557 | −7 % | 4 923 | −46 % |
+| Formulaire SITREP générique | 9 039 | 5 954 | 6 054 | −33 % | 3 584 | −60 % |
+| Fiche FM/SAT | 6 863 | 14 641 | 5 091 | −26 % | 3 944 | −43 % |
+| Fiche FM/SAT remplie | 7 207 | 14 843 | 5 312 | −26 % | 4 098 | −43 % |
+| Fiche HF | 4 230 | 4 568 | 3 076 | −27 % | 2 338 | −45 % |
+| Point de situation Excel | 23 984 | 11 067 | 11 616 | −52 % | 6 659 | −72 % |
+| Point de situation LibreOffice | 18 169 | 10 493 | 11 099 | −39 % | 7 100 | −61 % |
+| Bilan préfectoral | 25 261 | 10 280 | 10 242 | −59 % | 8 296 | −67 % |
+| Fiche de présentation Word, 4 pages | 31 087 | 16 754 | 16 842 | −46 % | 10 357 | −67 % |
+| Mémento Word, 14 pages | 141 373 | 101 199 | 101 444 | −28 % | 46 296 | −67 % |
+| SITREP OMS | 124 271 | 101 941 | 102 710 | −17 % | 61 778 | −50 % |
+
+Aux quatre préréglages, soit 44 archives : 1 441 025 octets pour F1GBD 2.2,
+975 720 pour le `.psdi` de la 2.6.0 (−32 %, −5,9 % sur la 2.5.0) et 567 326
+pour le `.psdz` (−61 %, −9,0 % sur la 2.5.0). Aucune des 44 archives `.psdi`
+n'est plus lourde que celle de F1GBD 2.2.
+
+Écart moyen à l'original, page par page à 100 dpi, en pour cent des 255
+niveaux de gris, à « Moyenne ». Chaque colonne est une chaîne complète, de
+l'encodeur au décodeur ; les deux dernières mélangent les deux programmes :
+
+| Document | F1GBD 2.2 | 2.5.0 | 2.6.0 | archive 2.6.0, décodeur F1GBD 2.2 | archive F1GBD 2.2, décodeur 2.6.0 |
+|---|---|---|---|---|---|
+| Formulaire SITREP, 2 pages | 0,50 | 2,53 | 0,19 | 0,51 | 0,11 |
+| Formulaire SITREP générique | 0,70 | 2,19 | 0,30 | 0,62 | 0,45 |
+| Fiche FM/SAT | 1,61 | 0,84 | 0,26 | 0,40 | 1,54 |
+| Fiche FM/SAT remplie | 1,65 | 0,90 | 0,27 | 0,41 | 1,59 |
+| Fiche HF | 0,95 | 0,53 | 0,18 | 0,29 | 0,90 |
+| Point de situation Excel | 0,69 | 0,72 | 0,35 | 0,51 | 0,68 |
+| Point de situation LibreOffice | 0,75 | 0,80 | 0,59 | 0,54 | 0,72 |
+| Bilan préfectoral | 4,32 | 5,33 | 1,63 | 2,73 | 4,31 |
+| Fiche de présentation Word, 4 pages | 2,76 | 4,68 | 1,47 | 1,63 | 2,72 |
+| Mémento Word, 14 pages | 2,40 | 3,80 | 1,62 | 1,81 | 2,29 |
+| SITREP OMS | 3,29 | 3,46 | 1,14 | 1,88 | 2,74 |
+| **Moyenne** | **1,78** | **2,34** | **0,73** | **1,03** | **1,64** |
+
+La 2.6.0 est la plus fidèle des trois chaînes sur chacun des onze documents.
+Ses archives recomposées par le décodeur de F1GBD 2.2 sont plus proches de
+l'original que les archives de F1GBD lui-même sur dix documents, à égalité
+sur le onzième ; les archives de F1GBD recomposées par notre décodeur le sont
+sur les onze. Sur nos archives, son décodeur ne fait mieux que le nôtre que
+sur le point de situation LibreOffice, dont les cellules sont dessinées en
+DejaVu Sans posé à pas fixe (voir les correctifs de la 2.5.0) : Liberation
+Mono, la police à chasse fixe sans empattements qu'il emploie, y ressemble
+davantage que Nimbus Mono.
+
+Deux réserves sur cette mesure. Elle rend l'original avec MuPDF : une police
+que l'original n'embarque pas — les deux formulaires SITREP sont en Helvetica
+non embarquée — y est dessinée en Nimbus Sans, la police même de notre
+décodeur, ce qui nous avantage sur ces deux lignes. Et elle compte des pixels,
+pas la lisibilité : le texte empilé au pied de la page dans la 2.2 ne coûte
+que 2,25 % au formulaire SITREP.
+
+Sur l'ensemble du banc d'essai — les 51 documents de la 2.5.0 et les sept
+nouveaux, dont 47 passent en mode structuré —, l'écart moyen de ces 47 tombe
+de 2,31 % à 1,04 % à « Moyenne », et la taille totale des archives augmente de
+1,2 %. Aucun document ne s'éloigne de l'original. Les documents Word gagnent
+le plus : de 2,40 à 0,91 % en moyenne sur les dix-neuf de Direwolf. La part
+des mots retrouvés ne baisse que sur un document, de 99,4 à 99,3 % : quatre
+bribes de formules lues autrement.
+
+**Ce que cela coûte.**
+
+- *Quelques octets sur les tableaux.* Le bas des boîtes n'est plus partagé par
+  toutes les lignes d'une page : +1 à +3 % sur les formulaires, +3 à +6 % sur
+  les deux points de situation. Les fiches FM/SAT et HF, elles, perdent 20 à
+  71 % selon le préréglage.
+- *Les documents LaTeX à formules : +13 à +15 %.* Leurs polices, reconnues,
+  portent désormais l'italique des variables et le gras des titres : une fois
+  et demie à deux fois plus de fragments que lorsque tout passait en
+  Helvetica romain.
+- *2,6 Mo de plus à l'installation*, les quatre styles de Carlito. Le PDF
+  recomposé, lui, est plutôt plus léger : il embarque les polices réduites à
+  leurs glyphes, de 46 à 385 ko sur les onze documents, contre 46 ko à 1,1 Mo
+  en 2.5.0, qui embarquait une police par page.
+
+**Pourquoi ne pas changer de bibliothèque comme F1GBD.** Sa raison est la
+licence : PyMuPDF est sous AGPL v3, et un programme qui l'emploie ne peut être
+diffusé que sous une licence qui en respecte les conditions — ce que n'est pas
+une licence non commerciale, sauf à acheter la licence commerciale d'Artifex.
+Ce dérivé est sous GPL v3, que son article 13 rend compatible avec l'AGPL v3 :
+la raison ne s'applique pas. Et les gains de
+fidélité ne venaient pas de la bibliothèque, mais de l'endroit où le texte est
+posé et de la police qui le dessine : reproduits sur PyMuPDF, ils dépassent
+ceux de la 2.2. Changer de bibliothèque obligerait à réécrire l'extraction,
+qui repose sur des fonctions propres à MuPDF — la position de chaque glyphe
+(`rawdict`), les tracés avec leurs découpes, les programmes de police, la
+lecture des lettres à pas fixe —, sans gain mesurable en vue. L'archive
+compacte `.psdz` n'en dépend pas : ses images passent par Pillow.
+
+**Essayé et écarté**, mesures à l'appui :
+
+| Piste | Mesure | Décision |
+|---|---|---|
+| Polices Liberation, comme le décodeur de F1GBD 2.2 | écart moyen 0,73 → 0,83 % sur les onze documents : plus loin de l'original sur quatre (0,19 → 0,57 % pour un formulaire SITREP), plus près sur trois, de 0,01 à 0,08 point | écarté |
+| Étirer les glyphes d'une ligne justifiée plutôt que ses espaces | plus loin de l'original sur les dix documents mesurés | écarté |
+| Justifier aussi les titres | une espace seulement dans un titre centré, souvent suivie d'une espace finale dans une autre police | écarté |
+| Comprimer un fragment trop large plutôt que réduire son corps | même écart, mais un « text writer » par fragment | écarté |
+| Un « text writer » par fragment | plusieurs secondes pour une page de trois cents lignes | un par suite de même couleur |
+
+**Qui lit quoi**, vérifié sur les onze documents :
+
+| Archive ↓ décodeur → | F1GBD 2.1.0 | F1GBD 2.2.0 | 2.5.0 | 2.6.0 |
+|---|---|---|---|---|
+| `.psdi` de F1GBD 2.1.0 | oui | oui | oui | oui |
+| `.psdi` de F1GBD 2.2.0 | sans les traits | oui | non, dès qu'un trait y figure | oui |
+| `.psdi` de 2.4.0 à 2.5.x | oui | texte empilé au pied des pages | oui | oui |
+| `.psdi` de 2.6.0 | oui | oui | oui | oui |
+| `.psdz` de 2.5.0 ou 2.6.0 | refusé par sa version | refusé par sa version | oui | oui |
+
+Une station qui échange avec des stations F1GBD 2.2 doit donc passer à la
+2.6.0 : c'est la première version de ce programme qui lise toutes leurs
+archives, et la seule depuis la 2.4.0 dont elles lisent correctement les
+siennes. Une
+station 2.5.0 lit les archives de la 2.6.0, `.psdi` comme `.psdz`, avec son
+propre rendu.
+
 ### Correctifs
 
 **Espaces perdus entre les mots (2.5.0).** LaTeX ne tape aucune espace : il
@@ -1116,7 +1443,11 @@ après. L'interopérabilité et le poids des archives ne bougent pas.
 Depuis la 2.3.0, une image dont le cadre n'a pas de surface, dont la charge
 utile manque ou que MuPDF ne sait pas lire n'est plus une défaillance : elle
 est sautée avec un avertissement dans le journal, et le reste de la page se
-recompose (voir « Relu avant publication »).
+recompose (voir « Relu avant publication »). Depuis la 2.6.0, il en va de même
+de toute entrée de page que le décodeur ne sait pas dessiner — dessin, image,
+coche, lien, bloc ou ligne de texte mal formés —, quel que soit le programme
+qui l'a écrite : la 2.5.0 s'arrêtait sur le premier trait d'une archive de
+F1GBD 2.2.
 
 Le corps d'une archive compacte est lu avec la même méfiance, et plus de
 raisons de l'exercer : un format binaire en colonnes n'a pas la syntaxe JSON
@@ -1135,14 +1466,14 @@ de 50 mégapixels.
 python -m unittest discover -s tests -t .
 ```
 
-264 tests, sans dépendance en plus de celles de l'application.
+309 tests, sans dépendance en plus de celles de l'application.
 
 | Fichier | Objet |
 |---|---|
 | `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles, dictionnaire LZMA, coordonnées à largeur fixe |
-| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, codage du texte, espaces entre les mots — y compris lettres à pas fixe et espaces après ligatures et symboles —, codec des images |
+| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, découpes, codage du texte, espaces entre les mots — y compris lettres à pas fixe, espaces après ligatures, symboles et puces —, pose du texte sur sa ligne de base, polices et classes, chasses exactes, ordre de lecture, entrées étrangères, traits de F1GBD 2.2, codec des images |
 | `tests/test_compact.py` | archives `.psdz` : manifeste en colonnes rendu à l'identique, repli JSON, corps abîmés, choix AVIF et WebP à fidélité au moins égale, pages en image, ligne de commande |
-| `tests/test_interop.py` | vecteurs de référence `.psdi` et `.psdz`, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, espaces rétablies ou corrigées, bordures, images, place des glyphes, refus des `.psdz`) |
+| `tests/test_interop.py` | vecteurs de référence `.psdi` et `.psdz`, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, ligne de base, espaces rétablies ou corrigées, bordures, bordures masquées, classe Calibri, images, place des glyphes, refus des `.psdz`) |
 | `tests/test_shell.py` | menu contextuel : forme des clés de registre, une cascade par format, commandes comprises par le CLI, détection et désinstallation |
 | `tests/test_notices.py` | en-têtes de copyright et SPDX, mentions de la fenêtre À propos et de `--version`, concordance des versions |
 
@@ -1206,12 +1537,20 @@ que la simulation est fidèle.
 l'interpréteur est un Python 3.13 — un `.pyc` ne se charge que dans la version
 qui l'a produit —, nos archives de cinq documents de test, à trois préréglages,
 sont recomposées par le vrai décodeur de F1GBD : même texte que par le nôtre,
-bordures LibreOffice présentes, images PNG placées, et chaque glyphe à moins
-d'un millième de point de sa place quand la boîte de ligne est ouverte (voir
-la 2.4.0). Une archive compacte, structurée ou en image, y est refusée par son
-numéro de version, avec un message, au lieu d'être lue de travers. Ailleurs, ces
-cinq tests sont sautés, pas échoués. `PSDI_REFERENCE_PYC` peut désigner le
-fichier explicitement.
+chaque ligne sur sa ligne de base à 0,06 pt près, bordures LibreOffice
+présentes et bordures masquées absentes, classe Calibri et clé `tl` lues sans
+dommage, images PNG placées, et chaque glyphe à moins de deux millièmes de
+point de sa place quand la boîte de ligne est ouverte vers la droite (voir la
+2.4.0 et la 2.6.0). Une archive compacte, structurée ou en image, y est refusée
+par son numéro de version, avec un message, au lieu d'être lue de travers.
+Ailleurs, ces tests sont sautés, pas échoués. `PSDI_REFERENCE_PYC` peut
+désigner le fichier explicitement.
+
+Le décodeur de F1GBD 2.2 n'a pas d'équivalent dans la suite : sa licence ne
+permet pas de l'y embarquer. Ce qu'il écrit y est reproduit à la main — les
+traits en polyligne `p` (`TestLinesWithPoints`) — et ce qu'il lit, vérifié par
+construction : une ligne accrochée à sa ligne de base l'est par le haut comme
+par le bas de sa boîte (`TestHungBoxes`).
 
 ---
 
@@ -1290,6 +1629,14 @@ zigzag ; une coordonnée est un entier en unités de 1/échelle de point. Le
 décodage redonne un manifeste égal à celui qui a été encodé, ce que l'encodeur
 vérifie avant de retenir les colonnes.
 
+Depuis la 2.6.0, quand le manifeste porte `"tl": 1`, une ligne dont la boîte
+est haute de 1,01 em de son plus grand corps — une boîte accrochée à la ligne
+de base, voir plus bas — est rangée avec le bas de la page pour bas, comme une
+boîte ouverte de la 2.5.0 ; le décodeur de la 2.6.0 recalcule le vrai bas, et
+celui de la 2.5.0 n'en a pas besoin, qui pose le texte depuis le haut. Une
+ligne dont le bas est réellement celui de la page ne reçoit pas le drapeau de
+boîte ouverte, si bien que la relecture est exacte.
+
 Le manifeste JSON est lui aussi un contrat. Les clés que cette version écrit en
 plus de la spécification d'origine sont toutes *optionnelles* et ignorées par un
 décodeur qui ne les connaît pas :
@@ -1298,6 +1645,14 @@ décodeur qui ne les connaît pas :
 |---|---|---|---|
 | `{"t": "line", …}` | entrée de `dr` | trait ; écrit par la 2.2.x seulement, toujours lu | sauté par `if not d['t'] == 'rect'` |
 | `lk` | page | liste `[{"b": boîte, "u": uri}]` | jamais lue |
+| `tl` | manifeste | `1` : boîtes de texte accrochées à la ligne de base (2.6.0) | jamais lue |
+| `"fa": "c"` | fragment | classe Calibri, posée en Carlito ; valeur que la 2.2.0 de F1GBD écrit aussi (2.6.0) | police sans empattement, comme une classe inconnue |
+
+La 2.2.0 de F1GBD écrit ses traits en `{"t": "line", "p": [x0, y0, x1, y1, …]}`,
+une polyligne aux coordonnées à plat, tracée ouverte, épaisse d'un demi-point
+sauf `w` contraire. Cette version les lit depuis la 2.6.0, et sait aussi la
+forme `r` à deux extrémités de la 2.2.x. Le décodeur 2.1.0 les saute comme
+tout ce qui n'est pas un `rect`.
 
 Depuis la 2.3.0, un trait est un `rect` ordinaire de hauteur ou de largeur
 nulle, tracé (`c`, `w`) : rien de nouveau pour un décodeur, et le décodeur
@@ -1316,9 +1671,30 @@ qu'un autre décodeur doit savoir :
 - toutes les lignes d'une page sont dans un seul bloc de `tb`, et un rectangle
   tracé sans remplissage peut être le cadre de quatre traits d'origine.
 
-Ces deux comportements sont ceux de la boucle `_rebuild_struct_mode` de
-`psdi_lib` 2.1.0, inchangée depuis `pdf_trans` 1.0.6. Ajouter une clé à ce
-tableau n'est acceptable qu'à cette même condition : le décodeur d'origine doit
+La 2.6.0 change la géométrie des boîtes de texte, pour que les trois décodeurs
+connus y trouvent la ligne de base :
+
+- la boîte `b` d'un fragment ou d'une ligne va de 0,8 em au-dessus de la ligne
+  de base à 0,21 em en dessous, l'em étant le plus grand corps de la ligne. Le
+  décodeur 2.1.0 de F1GBD pose le texte 0,8 em sous le haut de la boîte, celui
+  de la 2.2 à 0,21 em au-dessus du bas, celui-ci l'un ou l'autre : tous
+  tombent sur la ligne de base. Le manifeste le signale par `"tl": 1` ;
+- la boîte d'une ligne qui tient en taille réelle a pour bord droit celui de la
+  page, et garde son bas : le coin de la page de la 2.4.0 faisait poser ces
+  lignes au pied de la page par le décodeur de la 2.2 ;
+- la boîte d'un fragment suivi d'un autre englobe ses espaces finales, que le
+  décodeur de la 2.2 compte quand il ajuste un texte à sa boîte.
+
+Une archive sans `tl` est lue d'après la forme de ses boîtes : ouverte jusqu'au
+coin de la page (2.4.0 à 2.5.x), le texte est posé 0,8 em sous le haut ; à peine
+plus haute qu'un em (F1GBD 2.2), 0,21 em au-dessus du bas ; plus haute (boîte de
+police mesurée par MuPDF, 2.3.x et F1GBD 2.1.0), à la hauteur où la police met
+sa ligne de base.
+
+Les comportements de la dernière colonne du tableau des clés sont ceux de la
+boucle `_rebuild_struct_mode` de `psdi_lib` 2.1.0, inchangée depuis
+`pdf_trans` 1.0.6. Ajouter une clé à ce tableau n'est acceptable qu'à cette
+même condition : le décodeur d'origine doit
 l'ignorer sans erreur, ce que le test `TestInteropSafeAdditions` vérifie en
 exécutant un port fidèle de cette boucle, et ce que le banc de `reference/`
 confirme sur le bytecode réel.
@@ -1379,7 +1755,9 @@ si PyMuPDF, Pillow ou PyQt6 n'est pas importable, en nommant l'interpréteur
 qu'il a testé, et `build.cmd` vérifie après coup que `_internal\pymupdf` existe
 réellement. Depuis la 2.5.0, il refuse aussi un Pillow qui ne sait pas traiter
 l'AVIF et le WebP : l'exécutable produit ne saurait pas recomposer les `.psdz`
-qu'on lui enverrait.
+qu'on lui enverrait. Depuis la 2.6.0, il refuse de même un dossier
+`psditool/fonts` incomplet : sans Carlito, l'exécutable recomposerait encore
+chaque page, mais Calibri en Helvetica, réduit.
 
 PyMuPDF ne fournit aucun hook PyInstaller et PyInstaller n'en embarque pas non
 plus ; ses extensions compilées sont donc collectées explicitement. Les motifs
@@ -1508,3 +1886,13 @@ garantie, l'emplacement du texte de la licence et l'adresse du code source
 (article 5 d). Un installateur diffusé hors de ce dépôt — dans un recueil
 d'outils, sur une clé d'exercice — doit être accompagné de cette adresse ou des
 sources elles-mêmes (article 6).
+
+Le décodeur embarque Carlito, la police aux chasses de Calibri
+(`psditool/fonts/`, quatre styles, tels que publiés par le projet Carlito).
+Elle est sous SIL Open Font License 1.1, « Copyright 2013 The Carlito Project
+Authors, with Reserved Font Name "Carlito" », et son texte de licence,
+`OFL.txt`, l'accompagne dans les sources comme dans l'exécutable. L'OFL permet
+de l'embarquer dans un programme sous une autre licence, à condition de ne pas
+la vendre seule. Les PDF recomposés en contiennent les glyphes utilisés, ce que
+l'OFL permet aussi. Les autres polices des PDF recomposés — Nimbus, Noto — sont
+celles de MuPDF, distribuées avec PyMuPDF.

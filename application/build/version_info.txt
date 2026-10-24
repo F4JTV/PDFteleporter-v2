@@ -12,8 +12,8 @@
 
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(2, 5, 0, 0),
-        prodvers=(2, 5, 0, 0),
+        filevers=(2, 6, 0, 0),
+        prodvers=(2, 6, 0, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,          # VOS_NT_WINDOWS32
@@ -29,14 +29,14 @@ VSVersionInfo(
                     StringStruct("CompanyName", "The PDF Teleporter contributors"),
                     StringStruct("FileDescription",
                                  "Radio transport of PDF documents"),
-                    StringStruct("FileVersion", "2.5.0"),
+                    StringStruct("FileVersion", "2.6.0"),
                     StringStruct("InternalName", "PDFteleporter"),
                     StringStruct("LegalCopyright",
                                  "Copyright (C) 2026 The PDF Teleporter contributors. "
                                  "Based on PDF Teleporter by F1GBD. GNU GPL v3."),
                     StringStruct("OriginalFilename", "PDFteleporter.exe"),
                     StringStruct("ProductName", "PDF Teleporter"),
-                    StringStruct("ProductVersion", "2.5.0"),
+                    StringStruct("ProductVersion", "2.6.0"),
                 ],
             )
         ]),
