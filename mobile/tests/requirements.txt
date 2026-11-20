@@ -1,0 +1,5 @@
+# The reference half of the differential tests (the desktop engine runs on
+# these versions) and the Qt of the Android build, for tests/ui_preview.py.
+pymupdf==2.1
+pillow==13.0.0
+PySide6-Essentials==6.12.0
