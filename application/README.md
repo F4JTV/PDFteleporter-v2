@@ -107,6 +107,46 @@ l'AVIF : les roues de la 11.3 et des suivantes l'embarquent, sauf celles de
 Windows ARM64, et `requirements.txt` exige la 11.3. L'exécutable Windows,
 construit en x64, l'a sur toutes les machines, Arm64 comprises.
 
+### Sous Ubuntu 24.04 ou 26.04
+
+```
+bash install-ubuntu.sh
+```
+
+Ubuntu interdit `pip` dans le Python du système : le script crée un
+environnement Python dans `~/.local/share/pdfteleporter`, y installe ce que
+demande `requirements.txt`, puis pose un raccourci « PDF Teleporter » dans la
+grille des applications et sur le Bureau, et une commande `pdfteleporter`
+pour le terminal (`pdfteleporter compress SITREP.pdf -q low`). Rien ne demande
+les droits d'administrateur, sauf les paquets système qu'il propose
+d'installer s'ils manquent : `python3-venv`, et les bibliothèques que Qt charge
+pour ouvrir une fenêtre — `libxcb-cursor0` surtout, qu'Ubuntu n'installe pas et
+sans laquelle Qt 6.5 et suivants ne s'ouvrent pas en X11. La première
+installation télécharge environ 220 Mo, et l'environnement occupe un peu plus
+de 500 Mo.
+
+Les sources ne sont pas copiées : le raccourci les lance là où elles sont, et
+un `git pull` vaut au lancement suivant. Le script est à relancer après avoir
+déplacé le dossier, ou après une mise à niveau d'Ubuntu — la 26.04 passe de
+Python 3.12 à 3.14 —, qui laisse l'environnement inutilisable : il est alors
+recréé.
+
+| Option | Effet |
+|---|---|
+| `--dock` | épingle aussi le raccourci au dock |
+| `--no-desktop` | pas d'icône sur le Bureau, et retire celle déjà posée |
+| `--uninstall` | retire tout ce que le script a créé, jamais les sources |
+
+Lancée depuis le raccourci, l'application n'a pas de terminal où écrire : sa
+sortie va dans `~/.local/state/pdfteleporter/pdfteleporter.log`, et un arrêt sur
+erreur s'annonce par une notification qui renvoie à ce journal. Le lanceur
+donne aussi à la fenêtre le nom de son raccourci : c'est par ce nom que GNOME
+associe une fenêtre Wayland à son icône, et sans lui la fenêtre s'appelle
+« python3 » dans le dock. Vérifié sur Ubuntu 24.04 en X11, avec PyQt6 6.12,
+PyMuPDF 2.1 et Pillow 13, sur lesquels passent aussi les tests ; les mêmes roues
+existent pour le Python 3.14 de la 26.04, dont la session est uniquement
+Wayland. La session Wayland elle-même n'a pas pu être essayée.
+
 ## Utilisation
 
 ### Interface graphique
@@ -261,17 +301,26 @@ pèse 347 octets, la saisie absente ; la nôtre 725, la saisie présente.
 
 Une photographie de formulaire prise au téléphone ou un scan JPEG, PNG, TIFF,
 BMP ou WebP se compresse comme un PDF. Il n'y a pas de couche texte à
-structurer : l'image devient une page de l'archive version 2, telle quelle, et
-toute station lisant ce format la recompose sans rien connaître de nouveau.
+structurer : l'image devient une page de l'archive version 2, que le décodeur
+d'origine recompose sans rien connaître de nouveau.
 
 Un TIFF multipage donne une page par image. L'orientation EXIF est appliquée,
 sans quoi une photo prise en travers ressortirait en travers. La transparence
 est aplatie sur blanc, la couleur du papier. La taille de page est choisie pour
 que le grand côté corresponde à celui d'un A4, en gardant exactement le rapport
-d'aspect, et l'image est ré-échantillonnée à la résolution du préréglage — une
-photo de 12 mégapixels et un scan à 150 ppp de la même feuille pèsent la même
-chose sur l'air. Une page A4 photographiée tient dans environ 30 ko en « Très
-basse », lisible.
+d'aspect, et l'image est réduite à la résolution du préréglage — une photo de
+12 mégapixels et un scan à 150 ppp de la même feuille pèsent la même chose sur
+l'air. Elle n'est jamais agrandie : une capture d'écran plus petite que le
+préréglage garde ses pixels. Une page A4 photographiée tient dans environ
+30 ko en « Très basse », lisible.
+
+Chaque page prend la forme la plus légère qui lui reste fidèle : un JPEG pour
+une photographie ou un scan en couleurs, un PNG pour une capture d'écran, un
+schéma ou une page en noir et blanc — des aplats et des bords nets, ce qu'un
+JPEG code le plus mal. Une image de 256 couleurs ou moins part même telle
+quelle, à sa propre résolution et pixel pour pixel, quand c'est plus léger.
+Dans une archive compacte, la page devient AVIF ou WebP, le plus léger des
+deux.
 
 Le menu contextuel propose le même sous-menu de qualités sur ces types de
 fichiers.
@@ -1257,6 +1306,50 @@ propre rendu.
 
 ### Correctifs
 
+**Images plus lourdes une fois archivées.** Une capture d'écran, un schéma ou
+une page en noir et blanc enregistrés en PNG pouvaient donner une archive plus
+lourde que le fichier lui-même, jusqu'à douze fois pour un petit logo. Trois
+causes, mesurées sur dix images PNG de types courants :
+
+- *L'image était agrandie.* Chaque page était ré-échantillonnée à la
+  résolution du préréglage, vers le haut comme vers le bas : une boîte de
+  dialogue de 480 × 300 pixels devenait une page de 1 754 × 1 096 en
+  « Haute », treize fois plus de pixels pour aucun détail de plus. L'image
+  n'est plus que réduite.
+- *Chaque page était un JPEG.* C'est la bonne forme pour une photographie, la
+  pire pour des aplats et des bords nets, que le JPEG entoure d'artefacts
+  qu'il faut ensuite coder. La page passe maintenant par le choix que font
+  depuis la 2.3.0 les images d'un document structuré : un JPEG, ou un PNG
+  quand il est à la fois plus léger et plus fidèle. Une capture d'écran de
+  téléphone passe ainsi de 32 à 17 ko en « Basse ».
+- *Le noir et blanc devenait du gris.* Réduite, une page d'un bit par pixel
+  voit ses bords fondre en niveaux de gris, qu'une palette doit ensuite coder,
+  et cela coûte plus que la réduction ne fait gagner. Une image de 256
+  couleurs ou moins est donc aussi proposée telle quelle, à sa propre
+  résolution, et gardée quand elle pèse moins : pour une page à 200 ppp en
+  « Moyenne », 42 ko au lieu des 89 de la page réduite.
+
+Dans une archive compacte, la page devient le plus léger d'un AVIF accordé au
+JPEG et d'un WebP sans perte tiré du PNG : un scan en gris peut donner un PNG
+plus léger que le JPEG et pourtant un WebP plus lourd que l'AVIF.
+
+| Image PNG, « Haute », octets | Fichier | `.psdi` avant | `.psdi` après | `.psdz` avant | `.psdz` après |
+|---|---|---|---|---|---|
+| Boîte de dialogue, 480 × 300 | 24 653 | 57 890 | 2 515 | 32 038 | 1 873 |
+| Page en noir et blanc, 200 ppp | 44 135 | 183 940 | 41 696 | 94 065 | 40 467 |
+| Logo transparent, 256 × 256 | 2 645 | 31 653 | 1 202 | 11 584 | 847 |
+| Page capturée à 96 ppp | 450 955 | 137 518 | 82 041 | 80 304 | 32 382 |
+| Photographie | 273 825 | 67 469 | 39 255 | 44 319 | 20 658 |
+
+Sur les dix images, aux quatre préréglages, en `.psdi` comme en `.psdz`,
+17 archives sur 80 pesaient plus que le fichier ; aucune maintenant, et
+aucune n'a grossi. Rien ne change pour les PDF : leurs archives restent
+identiques octet pour octet, vecteurs de référence compris.
+
+Une page PNG dans une archive de version 2 se recompose avec le décodeur de
+F1GBD 2.1.0 exactement comme avec le nôtre : vérifié en exécutant son propre
+code. Avec F1GBD 2.2.0, ce n'est pas encore vérifié.
+
 **Espaces perdus entre les mots (2.5.0).** LaTeX ne tape aucune espace : il
 place chaque mot en déplaçant le curseur. MuPDF devine alors les espaces et
 donne à chacune un fragment à elle seule, que l'encodeur jetait avec tous les
@@ -1466,16 +1559,17 @@ de 50 mégapixels.
 python -m unittest discover -s tests -t .
 ```
 
-309 tests, sans dépendance en plus de celles de l'application.
+317 tests, sans dépendance en plus de celles de l'application.
 
 | Fichier | Objet |
 |---|---|
 | `tests/test_format.py` | conteneur : troncature, plafonds, entrées hostiles, dictionnaire LZMA, coordonnées à largeur fixe |
-| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, découpes, codage du texte, espaces entre les mots — y compris lettres à pas fixe, espaces après ligatures, symboles et puces —, pose du texte sur sa ligne de base, polices et classes, chasses exactes, ordre de lecture, entrées étrangères, traits de F1GBD 2.2, codec des images |
+| `tests/test_engine.py` | aller-retour, choix de mode, déterminisme, fidélité, compactage des dessins et cadres, découpes, codage du texte, espaces entre les mots — y compris lettres à pas fixe, espaces après ligatures, symboles et puces —, pose du texte sur sa ligne de base, polices et classes, chasses exactes, ordre de lecture, entrées étrangères, traits de F1GBD 2.2, codec des images, pages des fichiers image (jamais agrandies, jamais plus lourdes que le fichier pour une capture ou une page en noir et blanc) |
 | `tests/test_compact.py` | archives `.psdz` : manifeste en colonnes rendu à l'identique, repli JSON, corps abîmés, choix AVIF et WebP à fidélité au moins égale, pages en image, ligne de commande |
-| `tests/test_interop.py` | vecteurs de référence `.psdi` et `.psdz`, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, ligne de base, espaces rétablies ou corrigées, bordures, bordures masquées, classe Calibri, images, place des glyphes, refus des `.psdz`) |
+| `tests/test_interop.py` | vecteurs de référence `.psdi` et `.psdz`, décodage historique, décodeur d'origine exécuté depuis son bytecode (texte, ligne de base, espaces rétablies ou corrigées, bordures, bordures masquées, classe Calibri, images, pages PNG d'un fichier image, place des glyphes, refus des `.psdz`) |
 | `tests/test_shell.py` | menu contextuel : forme des clés de registre, une cascade par format, commandes comprises par le CLI, détection et désinstallation |
 | `tests/test_notices.py` | en-têtes de copyright et SPDX, mentions de la fenêtre À propos et de `--version`, concordance des versions |
+| `tests/test_ubuntu.py` | script d'installation sous Ubuntu : syntaxe, et ligne de commande du raccourci relue telle qu'écrite, chemins à espaces, accents et guillemets compris (sauté sans bash) |
 
 Les documents de test sont construits par `tests/fixtures.py` plutôt que livrés
 en fichiers PDF. Un PDF porte un horodatage de création et une disposition
@@ -1591,7 +1685,10 @@ petite des deux.
 
 Une charge utile de version 1 est un JPEG ou, depuis la 2.3.0, un PNG ; les deux
 décodeurs la passent telle quelle à `insert_image`, qui reconnaît le format à
-ses octets. Une charge utile de version 2 est toujours un JPEG. Le dictionnaire
+ses octets. Une charge utile de version 2 est un JPEG, ou un PNG pour la page
+d'un fichier image qui pèse moins ainsi : le décodeur d'origine la passe de même
+à `insert_image`, et la page se recompose chez lui comme chez nous, pixel pour
+pixel (vérifié avec son propre code, `tests/test_interop.py`). Le dictionnaire
 LZMA de l'encodeur ne dépasse jamais 8 Mio, la fenêtre par défaut du décodeur
 d'origine.
 

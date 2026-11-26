@@ -723,8 +723,11 @@ def _encode_jpeg(img: Image.Image, quality: int, allow_grayscale: bool = True) -
 # both ways and the smaller one is kept -- but a palette version only when it
 # is measurably closer to the source than the JPEG it replaces.
 #
-# Version 2 archives (page images) are left as JPEG: on a scan the noise makes
-# any lossless or palette coding several times larger, measured.
+# The pages a PDF renders to (version 2 archives) are left as JPEG: on a scan
+# the noise makes any lossless or palette coding several times larger,
+# measured. The pages of an image file are offered both ways
+# (_encode_image_file_page): such a file can as well be a screenshot or a page
+# in black and white, the graphics a JPEG codes worst.
 _PALETTE_SIZES = (4, 8, 16, 32, 64, 128, 256)
 # More distinct colours than this is a photograph; no palette will compete.
 _PALETTE_MAX_COLOURS = 4096
@@ -778,6 +781,26 @@ def _own_palette(img: Image.Image, colours: list) -> Image.Image:
     holder = Image.new("P", (1, 1))
     holder.putpalette(palette + [0] * (768 - len(palette)))
     return img.quantize(palette=holder, dither=Image.Dither.NONE)
+
+
+def _exact_palette(img: Image.Image, colours: list) -> Image.Image | None:
+    """An RGB image of at most 256 colours on a palette of exactly those,
+    or None when the mapping is not exact.
+
+    Unlike _own_palette's 256 entries, a palette as long as the colours lets
+    PNG pack 1, 2 or 4 bits a pixel: a page in black and white takes an
+    eighth of the bytes. The mapping goes through the same cache as
+    _own_palette's, hence the check, pixel for pixel.
+    """
+    palette = []
+    for _, rgb in colours:
+        palette.extend(rgb)
+    holder = Image.new("P", (1, 1))
+    holder.putpalette(palette)
+    mapped = img.quantize(palette=holder, dither=Image.Dither.NONE)
+    if ImageChops.difference(img, mapped.convert("RGB")).getbbox() is not None:
+        return None
+    return mapped
 
 
 # K-means passes refining the median-cut palette. Median cut averages each
@@ -841,17 +864,31 @@ def _encode_payload(img: Image.Image, quality: int, lzma_preset: int,
     return payload
 
 
+def _smallest_jpeg(img: Image.Image, quality: int, lzma_preset: int) -> bytes:
+    """The JPEG of `img`, progressive or baseline, whichever stores smaller.
+
+    The two hold the same coefficients and decode to the same pixels, and on
+    small images the extra scans of a progressive file cost more than they
+    save -- baseline won on two thirds of the images of the WHO bulletin.
+    """
+    best = None
+    for progressive in (True, False):
+        payload = _image_bytes(img, format="JPEG", quality=quality,
+                               optimize=True, progressive=progressive)
+        size = len(psdi.pack_payload(payload, lzma_preset)[1])
+        if best is None or size < best[0]:
+            best = (size, payload)
+    return best[1]
+
+
 def _smallest_classic_payload(img: Image.Image, quality: int, lzma_preset: int) -> bytes:
     """The smallest faithful JPEG or PNG, as every .psdi decoder reads them.
 
-    The JPEG is written both progressive and baseline: the two hold the same
-    coefficients and decode to the same pixels, and on small images the extra
-    scans of a progressive file cost more than they save -- baseline won on
-    two thirds of the images of the WHO bulletin. Then, for anything with few
-    enough colours to be a graphic, a PNG: lossless for a grey image, the
-    image's own colours when it has 256 or fewer, otherwise the smallest
-    palette -- and every one of these only when it beats the JPEG's fidelity
-    by _PALETTE_MARGIN_DB (a grey PNG always does). Sizes are compared as the
+    The JPEG first (_smallest_jpeg). Then, for anything with few enough
+    colours to be a graphic, a PNG: lossless for a grey image, the image's
+    own colours when it has 256 or fewer, otherwise the smallest palette --
+    and every one of these only when it beats the JPEG's fidelity by
+    _PALETTE_MARGIN_DB (a grey PNG always does). Sizes are compared as the
     container will store them, after its optional LZMA, which is what makes
     an uncompressed PNG the usual winner: LZMA codes raw palette indices
     better than deflate.
@@ -859,13 +896,8 @@ def _smallest_classic_payload(img: Image.Image, quality: int, lzma_preset: int) 
     def stored(payload: bytes) -> int:
         return len(psdi.pack_payload(payload, lzma_preset)[1])
 
-    best = None
-    for progressive in (True, False):
-        payload = _image_bytes(img, format="JPEG", quality=quality,
-                               optimize=True, progressive=progressive)
-        size = stored(payload)
-        if best is None or size < best[0]:
-            best = (size, payload)
+    jpeg = _smallest_jpeg(img, quality, lzma_preset)
+    best = (stored(jpeg), jpeg)
 
     if img.width * img.height > _PNG_MAX_PIXELS:
         return best[1]
@@ -1120,6 +1152,59 @@ def _encode_page(img: Image.Image, params: dict) -> bytes:
     # reference must be the same grey image the JPEG was made from.
     reference = img.convert("L") if Image.open(io.BytesIO(jpeg)).mode == "L" else img
     return _compact_payload(reference, jpeg, params["lzma_preset"])
+
+
+def _encode_image_file_page(source: Image.Image, img: Image.Image, params: dict) -> bytes:
+    """One page of an image file, in its smallest faithful form.
+
+    `source` is the frame as the file gives it, flattened to RGB, and `img`
+    the same at the preset's resolution, or `source` itself when it is no
+    larger. _encode_page makes every page a JPEG, which suits a scan or a
+    photograph. An image file can as well be a screenshot, a diagram or a
+    scan in black and white, flat colours and sharp edges that a JPEG codes
+    worst: a phone screenshot makes a JPEG page of 32 kB at "low", a PNG of
+    17. So the page is offered as an image of a structured archive is
+    (_smallest_classic_payload): a JPEG, or a PNG wherever it is smaller and
+    more faithful.
+
+    Then the source itself, exactly, at its own resolution, when it has 256
+    colours or fewer: reduced, the edges of a scan in black and white blur
+    into grey levels that a palette must then code, and that costs more than
+    the reduction saves -- for a 200 dpi page at "medium", 89 kB against 42.
+    A page can thus keep more pixels than the preset's resolution, but only
+    ever in fewer bytes.
+
+    In a compact archive, the smallest of AVIF matched on the JPEG and
+    lossless WebP of the PNG: a scan or a busy screenshot can make a PNG
+    smaller than the JPEG and still a larger WebP than the AVIF.
+    """
+    quality, preset = params["jpeg_quality"], params["lzma_preset"]
+
+    def stored(data: bytes) -> int:
+        return len(psdi.pack_payload(data, preset)[1])
+
+    if img.mode == "RGB" and _is_effectively_monochrome(img):
+        img = img.convert("L")
+    payload = _smallest_classic_payload(img, quality, preset)
+
+    pixels = source.width * source.height
+    colours = source.getcolors(256) if pixels <= _PNG_MAX_PIXELS else None
+    exact = _exact_palette(source, colours) if colours else None
+    if exact is not None:
+        levels = (0, 9) if pixels <= _PNG_DEFLATE_MAX_PIXELS else (0,)
+        for level in levels:
+            native = _image_bytes(exact, format="PNG", compress_level=level)
+            if stored(native) < stored(payload):
+                payload = native
+
+    if not params.get("compact"):
+        return payload
+    best = _compact_payload(img, payload, preset)
+    if psdi.payload_kind(payload) == "png":
+        jpeg = _compact_payload(img, _smallest_jpeg(img, quality, preset), preset)
+        if stored(jpeg) < stored(best):
+            best = jpeg
+    return best
 
 
 def _require_codecs(payloads) -> None:
@@ -3374,7 +3459,10 @@ def _compress_image_file(path: str, params: dict, progress_cb: ProgressFn) -> by
 
     The image is downsampled to the preset's DPI at the chosen page size, so
     a 12-megapixel photo and a 150-DPI scan of the same sheet come out the
-    same size on the air.
+    same size on the air. It is never enlarged: a screenshot of 480 by 300
+    pixels became a page of 1754 by 1096 at "high", thirteen times the
+    pixels and no more detail, in an archive more than twice the size of the
+    file.
     """
     frames = _load_image_as_page(path)
     if not frames:
@@ -3392,10 +3480,12 @@ def _compress_image_file(path: str, params: dict, progress_cb: ProgressFn) -> by
         width_pt, height_pt = _page_size_for(*frame.size)
         target = (max(1, int(round(width_pt * dpi / 72))),
                   max(1, int(round(height_pt * dpi / 72))))
-        if frame.size != target:
-            frame = frame.resize(target, Image.LANCZOS)
+        if frame.width > target[0] or frame.height > target[1]:
+            img = frame.resize(target, Image.LANCZOS)
+        else:
+            img = frame
         pages.append((width_pt, height_pt,
-                      _encode_page(frame, params)))
+                      _encode_image_file_page(frame, img, params)))
         progress.advance(_COST_RENDER_PAGE,
                          f"Préparation des images à {dpi} ppp ({i + 1}/{total})…")
 

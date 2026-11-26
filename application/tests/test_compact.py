@@ -606,7 +606,11 @@ class TestCompactPageImages(unittest.TestCase):
 
     def test_a_missing_codec_refuses_a_page_image_archive(self):
         compact, _ = engine.pdf_to_archive(self.photo, quality="low", compact=True)
-        with mock.patch.object(engine, "_codec_available", lambda name: name != "avif"):
+        # Text on a plain background: a lossless WebP or an AVIF, whichever
+        # is smaller. The codec missing is the page's own.
+        kind = psdi.payload_kind(psdi.read_image(compact).pages[0][2])
+        self.assertIn(kind, ("avif", "webp"))
+        with mock.patch.object(engine, "_codec_available", lambda name: name != kind):
             with self.assertRaises(psdi.PsdiError) as caught:
                 engine.archive_to_pdf(compact)
         self.assertIn("Pillow 11.3", str(caught.exception))

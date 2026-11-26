@@ -593,6 +593,28 @@ class TestOriginalDecoder(unittest.TestCase):
         # Inside the tallest bar of the chart.
         self.assertLess(pix.pixel(int(200 * 2), int(200 * 2))[0], 230)
 
+    def test_png_pages_of_an_image_file_are_placed(self):
+        # A screenshot's page is a PNG in a version 2 archive: its decoder
+        # hands the payload to insert_image, which reads PNG as it reads
+        # JPEG, so the page must come out as ours does.
+        import pymupdf
+
+        path = fixtures.screenshot_png(os.path.join(self._tmp.name, "dialog.png"))
+        data, _ = engine.pdf_to_archive(path, quality="low")
+        self.assertEqual(psdi.peek_version(data), psdi.ARCHIVE_VERSION_IMAGE)
+        self.assertEqual(psdi.payload_kind(psdi.read_image(data).pages[0][2]), "png")
+        theirs, info = self.original.archive_to_pdf(data)
+        self.assertEqual(info["pages"], 1)
+        ours, _ = engine.archive_to_pdf(data)
+        doc = pymupdf.open(stream=theirs, filetype="pdf")
+        try:
+            self.assertEqual(len(doc[0].get_images()), 1)
+        finally:
+            doc.close()
+        a, b = self._render(theirs), self._render(ours)
+        self.assertEqual((a.width, a.height), (b.width, b.height))
+        self.assertEqual(a.samples, b.samples)
+
 
 def _update_vectors() -> int:
     """Regenerate the golden vectors. Run deliberately, never automatically."""

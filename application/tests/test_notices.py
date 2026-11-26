@@ -40,7 +40,7 @@ def _source_files() -> list[str]:
                    if d not in ("__pycache__", "vectors", "assets", "dist", ".venv-build")]
         for name in files:
             rel = os.path.relpath(os.path.join(root, name), APP_DIR).replace(os.sep, "/")
-            if rel.endswith((".py", ".spec", ".iss", ".cmd")) or (
+            if rel.endswith((".py", ".spec", ".iss", ".cmd", ".sh")) or (
                     rel.startswith("build/version_info") and rel.endswith(".txt")):
                 found.append(rel)
     return sorted(found)

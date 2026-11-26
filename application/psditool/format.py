@@ -22,7 +22,9 @@ Version 1 (STRUCT) -- text, vector rectangles and images kept separate:
         uint32  payload length
         bytes   payload
 
-Version 2 (IMAGE) -- every page flattened to a single JPEG:
+Version 2 (IMAGE) -- every page flattened to a single image: a JPEG, or a
+PNG for a page from an image file that codes smaller that way (the original
+decoder hands either to MuPDF's insert_image):
 
     uint16  page count
     per page:

@@ -378,6 +378,85 @@ def graphics_report(path: str) -> str:
     return path
 
 
+# --- image files ------------------------------------------------------------------
+# What people send as images besides photographs: screenshots and scans. Flat
+# colours and hard edges, which a JPEG codes worst; each fixture is a case
+# where every page once made a JPEG at the preset's resolution, and the
+# archive came out larger than the file.
+
+def screenshot_png(path: str) -> str:
+    """A dialog box as a screen capture gives it: 480 by 300 pixels of flat
+    colours, hard edges and a few lines of anti-aliased text, in a PNG.
+
+    Enlarged to the preset's resolution and made a JPEG, it gave an archive
+    of more than twice the file at "high".
+    """
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (480, 300), (236, 239, 244))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((0, 0, 479, 39), fill=(33, 99, 170))
+    draw.text((14, 14), "PDF Teleporter - Compression", fill=(255, 255, 255))
+    for i in range(6):
+        draw.text((20, 60 + i * 28), f"Ligne d'information numero {i + 1} : 123 456 ko",
+                  fill=(30, 30, 30))
+    draw.rounded_rectangle((330, 250, 460, 286), radius=8, fill=(33, 99, 170))
+    draw.text((370, 262), "Envoyer", fill=(255, 255, 255))
+    img.save(path, optimize=True)
+    return path
+
+
+def _render_grey(pdf_path: str, dpi: int):
+    from PIL import Image
+
+    doc = fitz.open(pdf_path)
+    try:
+        pix = doc[0].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+    finally:
+        doc.close()
+    return Image.frombytes("L", (pix.width, pix.height), pix.samples)
+
+
+def bilevel_scan_png(path: str, dpi: int = 120) -> str:
+    """A page in black and white, as a fax or a scanner set to text gives
+    it: monochrome_scan_like at `dpi`, a bit a pixel, in a PNG.
+
+    Resampled to the preset's resolution, its edges blur into grey levels
+    that cost far more than the bits they replace: the archive came out at
+    many times the file.
+    """
+    page = _render_grey(monochrome_scan_like(path + ".pdf"), dpi)
+    page.point(lambda v: 255 if v > 160 else 0).convert("1").save(path, optimize=True)
+    return path
+
+
+def grey_scan_png(path: str, dpi: int = 100) -> str:
+    """A page scanned in grey: text_report at `dpi`, slightly soft, in a PNG.
+
+    It codes smaller as a grey PNG than as a JPEG, yet in a compact archive
+    the AVIF matched on the JPEG comes out smaller than the PNG's lossless
+    WebP.
+    """
+    from PIL import ImageFilter
+
+    page = _render_grey(text_report(path + ".pdf", pages=1), dpi)
+    page.filter(ImageFilter.GaussianBlur(0.5)).save(path, optimize=True)
+    return path
+
+
+def photo_jpeg(path: str, seed: int = 11) -> str:
+    """A photograph, as far as a codec can tell: 600 by 400 pixels of noise,
+    which nothing stores well but JPEG and AVIF."""
+    from PIL import Image
+
+    rng = random.Random(seed)
+    img = Image.new("RGB", (600, 400))
+    img.putdata([(rng.randrange(256), rng.randrange(256), rng.randrange(256))
+                 for _ in range(600 * 400)])
+    img.save(path, format="JPEG", quality=90)
+    return path
+
+
 def _set_words(page, y: float, words, x: float = 50, size: float = 10.0,
                gap: float = 0.33) -> float:
     """Place each word on its own, `gap` em after the last: no space typed."""

@@ -2390,10 +2390,21 @@ class TestImageInput(unittest.TestCase):
 
         from PIL import Image
 
-        data, _ = engine.pdf_to_archive(self.png_alpha, quality="low")
+        path = os.path.join(self._tmp.name, "cutout.png")
+        cutout = Image.new("RGBA", (400, 300), (0, 0, 0, 0))
+        cutout.paste((200, 30, 30, 255), (100, 75, 300, 225))
+        cutout.save(path)
+        data, _ = engine.pdf_to_archive(path, quality="low")
         payload = psdi.read_image(data).pages[0][2]
         image = Image.open(io.BytesIO(payload))
-        self.assertIn(image.mode, ("RGB", "L"))
+        # A page can be a palette PNG as well as a JPEG; what must not
+        # survive is the alpha channel.
+        self.assertIn(image.mode, ("RGB", "L", "P"))
+        self.assertNotIn("transparency", image.info)
+        rgb = image.convert("RGB")
+        for point, wanted in (((5, 5), (255, 255, 255)), ((200, 150), (200, 30, 30))):
+            for found, value in zip(rgb.getpixel(point), wanted):
+                self.assertAlmostEqual(found, value, delta=12)
 
     def test_output_is_downsampled_to_the_preset(self):
         # A 12-megapixel photo and a 150-DPI scan of the same sheet must come
@@ -2408,6 +2419,90 @@ class TestImageInput(unittest.TestCase):
         data, info = engine.pdf_to_archive(self.jpeg, quality="low",
                                            mode=engine.MODE_STRUCT)
         self.assertEqual(info["mode"], engine.MODE_IMAGE)
+
+
+class TestImageFilePages(unittest.TestCase):
+    """An image file's pages in their smallest faithful form.
+
+    Every page used to be resampled to the preset's resolution and made a
+    JPEG. A screenshot, a diagram or a page in black and white -- flat
+    colours and hard edges -- then came out as an archive larger than its
+    PNG, up to many times.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        folder = cls._tmp.name
+        cls.screenshot = fixtures.screenshot_png(os.path.join(folder, "dialog.png"))
+        cls.bilevel = fixtures.bilevel_scan_png(os.path.join(folder, "fax.png"))
+        cls.grey_scan = fixtures.grey_scan_png(os.path.join(folder, "scan.png"))
+        cls.photo = fixtures.photo_jpeg(os.path.join(folder, "photo.jpg"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def _page(data):
+        return psdi.read_image(data).pages[0]
+
+    def test_graphics_never_outweigh_their_file(self):
+        for path in (self.screenshot, self.bilevel):
+            size = os.path.getsize(path)
+            for quality in QUALITY_ORDER:
+                for compact in (False, True):
+                    with self.subTest(file=os.path.basename(path), quality=quality,
+                                      compact=compact):
+                        data, _ = engine.pdf_to_archive(path, quality=quality,
+                                                        compact=compact)
+                        self.assertLess(len(data), size)
+
+    def test_a_small_image_is_not_enlarged(self):
+        # The page keeps its A4 size in points; its pixels are not
+        # multiplied -- enlarging adds pixels, not detail.
+        import io
+
+        from PIL import Image
+
+        for quality in QUALITY_ORDER:
+            with self.subTest(quality=quality):
+                data, _ = engine.pdf_to_archive(self.photo, quality=quality)
+                width, height, payload = self._page(data)
+                self.assertAlmostEqual(width, 842.0, places=3)
+                self.assertAlmostEqual(height, 842.0 * 400 / 600, places=3)
+                self.assertEqual(Image.open(io.BytesIO(payload)).size, (600, 400))
+
+    def test_a_photograph_stays_a_jpeg(self):
+        data, _ = engine.pdf_to_archive(self.photo, quality="low")
+        self.assertEqual(psdi.payload_kind(self._page(data)[2]), "jpeg")
+
+    def test_a_page_in_black_and_white_is_kept_exactly(self):
+        # Reduced, its edges would blur into grey levels for a palette to
+        # code; kept, it takes a bit a pixel, and every pixel is the file's.
+        import io
+
+        from PIL import Image, ImageChops
+
+        source = Image.open(self.bilevel).convert("RGB")
+        data, _ = engine.pdf_to_archive(self.bilevel, quality="low")
+        payload = self._page(data)[2]
+        self.assertEqual(psdi.payload_kind(payload), "png")
+        page = Image.open(io.BytesIO(payload)).convert("RGB")
+        self.assertEqual(page.size, source.size)
+        self.assertIsNone(ImageChops.difference(page, source).getbbox())
+
+    def test_a_compact_page_takes_the_smaller_of_avif_and_webp(self):
+        # A grey scan codes smaller as a PNG than as a JPEG, yet the PNG's
+        # lossless WebP is larger than the AVIF the JPEG leads to.
+        if not engine._codec_available("avif"):
+            self.skipTest("this Pillow has no AVIF codec")
+        classic, _ = engine.pdf_to_archive(self.grey_scan, quality="ultra_low")
+        compact, _ = engine.pdf_to_archive(self.grey_scan, quality="ultra_low",
+                                           compact=True)
+        self.assertEqual(psdi.payload_kind(self._page(classic)[2]), "png")
+        self.assertEqual(psdi.payload_kind(self._page(compact)[2]), "avif")
+        self.assertLess(len(compact), len(classic))
 
 
 class TestInteropSafeAdditions(unittest.TestCase):
