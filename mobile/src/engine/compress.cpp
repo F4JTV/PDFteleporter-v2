@@ -288,9 +288,11 @@ psdi::Bytes compress_image_file(const std::string &path, const Params &params, c
         auto [width_pt, height_pt] = page_size_for(frame.width(), frame.height());
         int tw = static_cast<int>(std::max(1LL, py::round_int(width_pt * dpi / 72)));
         int th = static_cast<int>(std::max(1LL, py::round_int(height_pt * dpi / 72)));
-        if (frame.width() != tw || frame.height() != th)
-            frame = frame.resize(tw, th, img::Filter::Lanczos);
-        pages.push_back({width_pt, height_pt, encode_page(frame, params)});
+        // Down to the preset's resolution, never up: enlarging adds pixels,
+        // not detail.
+        img::Image image = frame.width() > tw || frame.height() > th ? frame.resize(tw, th, img::Filter::Lanczos)
+                                                                     : frame;
+        pages.push_back({width_pt, height_pt, encode_image_file_page(frame, image, params)});
         progress.advance(kCostRenderPage, count_label(label, i + 1, total));
     }
 

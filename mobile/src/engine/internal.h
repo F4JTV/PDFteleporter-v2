@@ -121,6 +121,9 @@ struct PlacedImage {
 std::optional<PlacedImage> extract_placed_image(mu::Document &doc, int xref, const Params &params,
                                                 std::pair<double, double> placed_pt);
 std::string encode_page(const img::Image &image, const Params &params);
+// `source` the frame as the file gives it, `image` the same at the preset's
+// resolution, or `source` itself when no larger.
+std::string encode_image_file_page(const img::Image &source, img::Image image, const Params &params);
 // Image.frombytes("RGB", ...) over a rendered page or region.
 img::Image image_of_raster(const mu::Raster &raster);
 

@@ -77,6 +77,21 @@ Image own_palette(const Image &image, const std::vector<std::pair<long, std::vec
     return image.quantize_to(palette);
 }
 
+// _exact_palette: an RGB image of at most 256 colours on a palette of
+// exactly those, which PNG packs at 1, 2 or 4 bits a pixel; nullopt when the
+// mapping, through the same cache as own_palette's, is not exact.
+std::optional<Image> exact_palette(const Image &image,
+                                   const std::vector<std::pair<long, std::vector<int>>> &colours) {
+    std::vector<uint8_t> palette;
+    for (const auto &[count, rgb] : colours)
+        for (int v : rgb)
+            palette.push_back(static_cast<uint8_t>(v));
+    Image mapped = image.quantize_to(palette);
+    if (img::difference(image, mapped.convert(Mode::RGB)).getbbox())
+        return std::nullopt;
+    return mapped;
+}
+
 std::vector<Image> palettes_at(const Image &base, int size, double target) {
     Image quantised = base.quantize(size, kPaletteKmeans);
     if (img::psnr(base, quantised) >= target)
@@ -110,7 +125,9 @@ std::vector<Image> smallest_palettes(const Image &base, int n_colours, double ta
     return found;
 }
 
-std::string smallest_classic_payload(const Image &image, int quality, int lzma_preset) {
+// _smallest_jpeg: progressive or baseline, whichever the container stores
+// smaller.
+std::string smallest_jpeg(const Image &image, int quality, int lzma_preset) {
     std::optional<std::pair<size_t, std::string>> best;
     for (bool progressive : {true, false}) {
         std::string payload = img::save_jpeg(image, quality, true, progressive);
@@ -118,6 +135,12 @@ std::string smallest_classic_payload(const Image &image, int quality, int lzma_p
         if (!best || size < best->first)
             best = std::make_pair(size, payload);
     }
+    return best->second;
+}
+
+std::string smallest_classic_payload(const Image &image, int quality, int lzma_preset) {
+    std::string jpeg = smallest_jpeg(image, quality, lzma_preset);
+    std::optional<std::pair<size_t, std::string>> best = std::make_pair(stored(jpeg, lzma_preset), jpeg);
     if (pixels(image) > kPngMaxPixels)
         return best->second;
     auto colours = image.getcolors(kPaletteMaxColours);
@@ -333,6 +356,44 @@ std::string encode_page(const img::Image &image, const Params &params) {
     auto header = img::open(jpeg);
     Image reference = header && header->mode() == Mode::L ? image.convert(Mode::L) : image;
     return compact_payload(reference, jpeg, params.preset.lzma_preset);
+}
+
+// _encode_image_file_page: the page of an image file in its smallest
+// faithful form -- the JPEG or PNG an image of a structured archive gets,
+// then the source itself, exactly and at its own resolution, when it has
+// 256 colours or fewer; in a compact archive, the smaller of AVIF matched on
+// the JPEG and lossless WebP of the PNG.
+std::string encode_image_file_page(const img::Image &source, img::Image image, const Params &params) {
+    const int quality = params.preset.jpeg_quality, preset = params.preset.lzma_preset;
+    if (image.mode() == Mode::RGB && is_effectively_monochrome(image))
+        image = image.convert(Mode::L);
+    std::string payload = smallest_classic_payload(image, quality, preset);
+
+    const long long px = pixels(source);
+    std::optional<std::vector<std::pair<long, std::vector<int>>>> colours;
+    if (px <= kPngMaxPixels)
+        colours = source.getcolors(256);
+    std::optional<Image> exact;
+    if (colours && !colours->empty())
+        exact = exact_palette(source, *colours);
+    if (exact) {
+        std::vector<int> levels = px <= kPngDeflateMaxPixels ? std::vector<int>{0, 9} : std::vector<int>{0};
+        for (int level : levels) {
+            std::string native = img::save_png(*exact, level);
+            if (stored(native, preset) < stored(payload, preset))
+                payload = native;
+        }
+    }
+
+    if (!params.compact)
+        return payload;
+    std::string best = compact_payload(image, payload, preset);
+    if (psdi::payload_kind(payload) == "png") {
+        std::string jpeg = compact_payload(image, smallest_jpeg(image, quality, preset), preset);
+        if (stored(jpeg, preset) < stored(best, preset))
+            best = jpeg;
+    }
+    return best;
 }
 
 // For the page-image encoders in compress.cpp.
