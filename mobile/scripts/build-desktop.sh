@@ -44,13 +44,16 @@ step() { printf '\n=== %s\n' "$*"; }
 if [ "$APT" = 1 ]; then
     step "Paquets système"
     sudo apt-get update
+    # The file dialogs: GNOME's own through qt6-gtk-platformtheme, and where
+    # Qt has none to show, Qt Quick's, which needs Qt.labs.folderlistmodel --
+    # without it, Qt 6.4 crashes as the dialog opens.
     sudo apt-get install -y --no-install-recommends \
         git cmake ninja-build g++ pkg-config nasm perl python3 python3-venv \
         libgl-dev libaom-dev libyuv-dev \
-        qt6-base-dev qt6-declarative-dev \
+        qt6-base-dev qt6-declarative-dev qt6-gtk-platformtheme \
         qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-dialogs \
         qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates \
-        qml6-module-qtquick-window qml6-module-qtqml-workerscript \
+        qml6-module-qtquick-window qml6-module-qtqml-workerscript qml6-module-qt-labs-folderlistmodel \
         xvfb xauth libxcb-cursor0 libxkbcommon-x11-0
 fi
 
@@ -77,7 +80,10 @@ if [ "$TEST" = 1 ]; then
     mkdir -p "$out"
     pdfs=("$REPO/sitrep_urgence_oms_mali_mois_de_mai_2021.vv10482.pdf"
           "$REPO/PDFteleporter-comparaison-note-responsable-de-zone.pdf")
-    "$venv/bin/python" "$HERE/tests/compare_engine.py" "$BUILD/pdft-cli" "$out/engine" "${pdfs[@]}"
+    "$venv/bin/python" "$HERE/tests/make_images.py" "$out/images" > "$out/images.txt"
+    mapfile -t images < "$out/images.txt"
+    "$venv/bin/python" "$HERE/tests/compare_engine.py" "$BUILD/pdft-cli" "$out/engine" \
+        "${pdfs[@]}" "${images[@]}"
     "$venv/bin/python" "$HERE/tests/compare_rebuild.py" "$BUILD/pdft-cli" "$out/rebuild" \
         "$out"/engine/cpp/*.psd? "$REPO"/application/tests/vectors/*.psdz
 

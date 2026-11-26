@@ -140,12 +140,39 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(pdft_engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# --- third-party code, kept inside -------------------------------------------------
+# MuPDF and its libraries go into each program, under the names of libraries
+# that Qt and the system have copies of: FreeType, libjpeg, zlib... A program
+# uses its own copies and exports none: exported, they would stand in for the
+# others' in Qt, fontconfig or HarfBuzz once the program is loaded. And after
+# each link, a check that none was taken from another library either
+# (cmake/CheckOwnSymbols.cmake).
+set(PDFT_CHECK_OWN_SYMBOLS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckOwnSymbols.cmake")
+function(pdft_keep_third_party_inside _target)
+    target_link_options(${_target} PRIVATE "LINKER:--exclude-libs,ALL")
+    if(NOT CMAKE_NM)
+        message(WARNING "No nm program: ${_target} is linked without the check of its symbols.")
+        return()
+    endif()
+    set(_archives "")
+    foreach(_lib IN LISTS MUPDF_ARCHIVES)
+        list(APPEND _archives "$<TARGET_FILE:${_lib}>")
+    endforeach()
+    list(JOIN _archives "|" _archives)
+    add_custom_command(TARGET ${_target} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" "-DNM=${CMAKE_NM}" "-DBINARY=$<TARGET_FILE:${_target}>"
+                "-DARCHIVES=${_archives}" -P "${PDFT_CHECK_OWN_SYMBOLS}"
+        COMMENT "Checking that ${_target} takes MuPDF's functions from MuPDF"
+        VERBATIM)
+endfunction()
+
 # --- command-line tool -------------------------------------------------------------
 if(PDFT_BUILD_TOOLS AND NOT ANDROID)
     add_executable(pdft-cli tools/pdft_cli.cpp tools/facade_dump.cpp tools/imaging_check.cpp)
     target_include_directories(pdft-cli PRIVATE tools)
     target_compile_definitions(pdft-cli PRIVATE PDFT_CLI_DUMP PDFT_CLI_ENGINE)
     target_link_libraries(pdft-cli PRIVATE pdft_core pdft_imaging pdft_engine)
+    pdft_keep_third_party_inside(pdft-cli)
 endif()
 
 # --- the application ---------------------------------------------------------------
@@ -172,6 +199,7 @@ if(PDFT_BUILD_APP)
     target_include_directories(pdfteleporter PRIVATE app)
     target_link_libraries(pdfteleporter PRIVATE
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 pdft_engine)
+    pdft_keep_third_party_inside(pdfteleporter)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(pdfteleporter PRIVATE -Wall -Wextra -Wno-unused-parameter)
     endif()

@@ -9,6 +9,7 @@
 #include "presets.h"
 
 #include <QClipboard>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -281,7 +282,12 @@ Backend::Settings Backend::current_settings() const {
     return Settings{source_path_, source_generation_, quality_id(), text_only_, !compatible_};
 }
 
-void Backend::say(const QString &message, const QString &level) { log_.append(message, level); }
+// The log of the interface, copied to the system's (Android: logcat), where
+// the last lines before an unexpected stop remain readable.
+void Backend::say(const QString &message, const QString &level) {
+    qInfo().noquote() << QStringLiteral("[%1] %2").arg(level, message);
+    log_.append(message, level);
+}
 
 void Backend::set_busy(bool busy, const QString &title) {
     busy_ = busy;
@@ -315,6 +321,7 @@ QString Backend::output_dir(const QString &kind) const {
 
 QString Backend::import_file(const QUrl &url, QString *display_name) {
     QString name = file_name_of(url);
+    qInfo().noquote() << "import" << name;
     QFileInfo info(name);
     *display_name = info.fileName();
     if (url.isLocalFile())

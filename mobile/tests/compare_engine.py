@@ -38,8 +38,11 @@ PDF_CASES = [
     {"quality": "high"},
 ]
 IMAGE_CASES = [
+    {"quality": "ultra_low"},
     {"quality": "medium"},
+    {"quality": "high"},
     {"quality": "low", "compact": True},
+    {"quality": "high", "compact": True},
 ]
 
 

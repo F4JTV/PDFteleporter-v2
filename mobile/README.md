@@ -46,9 +46,9 @@ moteurs et comparent les résultats :
 
 | Essai | Résultat |
 |---|---|
-| Compression `.psdi`, 14 PDF et 16 images, plusieurs qualités | 83 archives identiques octet pour octet |
-| Compression `.psdz` | identiques avec libaom 3.14.1 ; avec une autre libaom, seules les images AVIF diffèrent |
-| Recomposition, 159 archives | 159 PDF identiques (hors identifiant aléatoire `/ID`) |
+| Compression `.psdi`, 14 PDF et 35 images (captures d'écran, scans, photos, tous formats et modes de couleur), plusieurs qualités | 161 archives identiques octet pour octet |
+| Compression `.psdz` | identiques avec libaom 3.14.1 ; avec une autre libaom, seules les images AVIF diffèrent, et le format d'une page quand cette libaom fait l'AVIF plus léger (2 pages sur 84 avec la 3.8.2 d'Ubuntu 24.04) |
+| Recomposition, 246 archives | 246 PDF identiques (hors identifiant aléatoire `/ID`) |
 | Couche image, 3 466 opérations | toutes identiques, hors AVIF avec une autre libaom |
 
 Les archives restent les mêmes, octet pour octet, quand le moteur est
@@ -144,6 +144,32 @@ l'installation d'applications de source inconnue), ou
 `adb install mobile/dist/PDFTeleporter-2.6.0-android.apk`. Android 9 ou plus
 récent.
 
+**Si l'application s'arrête**, le journal du téléphone dit pourquoi. Le
+téléphone branché en USB, débogage USB activé :
+
+```
+bash mobile/scripts/android-log.sh            # --install : installe d'abord l'APK
+```
+
+Le script enregistre les plantages que le téléphone a gardés, lance
+l'application, puis tout ce qui se journalise pendant qu'on reproduit le
+problème, jusqu'à Ctrl+C. Le fichier est dans `mobile/dist/`.
+
+**Deux FreeType dans l'APK.** Qt pour Android embarque son propre FreeType
+dans `libQt6Gui` et en publie toutes les fonctions ; MuPDF a le sien, compilé
+avec d'autres options. Lié dans l'ordre ordinaire, Qt d'abord, le programme
+prenait chez Qt les fonctions que rien d'autre n'avait tirées de l'archive de
+MuPDF, dont `FT_Add_Default_Modules` : les pilotes de polices de Qt
+s'installaient dans le FreeType de MuPDF, et l'application s'arrêtait à la
+première lettre mesurée, dès l'ouverture d'un PDF. FreeType est donc lié en
+entier, les bibliothèques tierces restent internes au programme
+(`--exclude-libs`), et après chaque édition de liens
+`cmake/CheckOwnSymbols.cmake` arrête la compilation si une fonction des
+archives de MuPDF vient encore d'une autre bibliothèque. Sur le bureau, le
+programme ne publie plus non plus les FreeType, libjpeg, zlib, Brotli et xz
+qu'il embarque, que Qt, fontconfig et HarfBuzz utilisaient à la place de ceux
+du système.
+
 ## Compiler sur GitHub
 
 Le workflow `.github/workflows/mobile.yml` fait tout sur les serveurs de
@@ -170,6 +196,16 @@ Construit, sur le Qt 6.4 d'Ubuntu, `pdft-cli` (le moteur seul) et
 `pdfteleporter` (l'interface), puis lance les tests différentiels et la
 visite de l'interface. `--local-avif` compile libaom et libyuv depuis leurs
 sources, comme pour Android, au lieu de prendre celles du système.
+
+Les tests différentiels portent sur les deux PDF du dépôt et sur quatre
+images construites par `tests/make_images.py` — une capture d'écran, une page
+en noir et blanc, un scan en gris et une photo —, chacune à cinq réglages.
+
+Les fenêtres de choix de fichier sont celles de GNOME grâce au paquet
+`qt6-gtk-platformtheme`. Là où Qt n'en a pas à montrer, il dessine les
+siennes, qui demandent `qml6-module-qt-labs-folderlistmodel` : sans ce
+module, le Qt 6.4 d'Ubuntu s'arrête net à l'ouverture. Le script installe
+les deux ; avec `--no-apt`, les installer soi-même.
 
 ```
 pdft-cli compress document.pdf archive.psdi --quality low
@@ -210,7 +246,8 @@ android/             manifeste, activité Java, icônes, thème de démarrage
 src/core/            format .psdi/.psdz, JSON, LZMA, façade MuPDF
 src/engine/          compression et recomposition
 src/imaging/         images comme Pillow : libImaging de Pillow 13, codecs
-cmake/               MuPDF, codecs et libjpeg-turbo construits depuis leurs sources
+cmake/               MuPDF, codecs et libjpeg-turbo construits depuis leurs sources ;
+                     contrôle des symboles après chaque édition de liens
 scripts/             récupération des sources, compilation Android et bureau
 tests/               tests différentiels, aperçu de l'interface sur Qt 6.12
 tools/               pdft-cli ; génération des icônes et des mentions tierces

@@ -207,11 +207,24 @@ add_library(mupdf INTERFACE)
 add_library(mupdf::mupdf ALIAS mupdf)
 target_include_directories(mupdf INTERFACE "${MUPDF_DIR}/include")
 target_compile_definitions(mupdf INTERFACE ${MUPDF_FEATURE_DEFINES})
-# Static libraries that reference one another: the linker is asked to go
-# round them until every symbol is found.
+# FreeType goes in whole. Qt for Android links its own FreeType into
+# libQt6Gui, and FreeType declares its functions visible whatever the build
+# asks, so libQt6Gui exports them all. Met there first by lld, a function that
+# nothing else drew from MuPDF's archive stayed Qt's: FT_Add_Default_Modules,
+# alone in its file, filled MuPDF's FreeType with Qt's font drivers, built
+# with other options than MuPDF's (slimftoptions.h), and the app crashed on
+# the first glyph it measured. Linked whole, every function is MuPDF's own,
+# wherever Qt stands on the link line.
+set(_mupdf_grouped ${_mupdf_third_targets})
+list(REMOVE_ITEM _mupdf_grouped mupdf_third_freetype)
+# The others reference one another: the linker is asked to go round them until
+# every symbol is found.
 target_link_libraries(mupdf INTERFACE
-    "$<LINK_GROUP:RESCAN,mupdf_core,mupdf_fonts,${_mupdf_third_targets}>"
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,mupdf_third_freetype>"
+    "$<LINK_GROUP:RESCAN,mupdf_core,mupdf_fonts,${_mupdf_grouped}>"
     Threads::Threads m)
+# For the check after each link (cmake/CheckOwnSymbols.cmake).
+set(MUPDF_ARCHIVES mupdf_core mupdf_fonts ${_mupdf_third_targets})
 # For the program's own C++ code: the zlib and libjpeg MuPDF carries are the
 # ones it compresses PNG and encodes JPEG with, so that only one copy of each
 # goes into the binary.
